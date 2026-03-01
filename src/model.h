@@ -204,7 +204,7 @@ public:
                 }
 
                 // Softmax over attention scores
-                cpu_softmax(att_h, pos + 1);
+                compute.softmax(att_h, pos + 1);
 
                 // Weighted sum of values
                 float* out_h = xb2.data() + h * head_dim;

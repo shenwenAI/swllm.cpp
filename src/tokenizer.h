@@ -190,7 +190,8 @@ private:
                     tokens.push_back(it->second);
                 } else {
                     // Skip unknown bytes
-                    fprintf(stderr, "Warning: unknown byte 0x%02X in input\n", byte_val);
+                    fprintf(stderr, "Warning: unknown byte 0x%02X at position %zu in input\n",
+                            byte_val, i);
                 }
                 i++;
             }
