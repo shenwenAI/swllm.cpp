@@ -1,7 +1,6 @@
 // llm.cpp - A lightweight C++ LLM inference engine
-//
 // Supports loading GGUF models and running text generation on CPU or GPU.
-// Usage: ./llm -m <model_path> [options] -p "prompt"
+// It only can use F32, F16,Q4_0,Q8_0
 
 #include <chrono>
 #include <cstdio>
