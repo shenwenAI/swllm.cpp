@@ -19,6 +19,7 @@
 #ifdef LLM_USE_CUDA
 // Forward declarations for CUDA kernels (defined in cuda_kernels.cu)
 void cuda_matmul(float* out, const float* a, const float* b, int M, int N, int K);
+void cuda_matmul_transposed_weight(float* out, const float* x, const float* w, int N, int K);
 void cuda_rmsnorm(float* out, const float* x, const float* w, int n, float eps);
 void cuda_softmax(float* x, int n);
 void cuda_silu_elementwise_mul(float* out, const float* gate, const float* up, int n);
@@ -121,6 +122,20 @@ inline void dequantize(const void* src, float* dst, int64_t n, GGMLType type) {
     }
 }
 
+// ---- Lightweight quantized weight handle ----
+
+// Holds a raw (potentially quantized) weight tensor.  For Q4_0 and Q8_0 the
+// data pointer points directly into the GGUF file's owned_data buffer, so no
+// extra allocation or dequantization is needed at load time.  For F32 the
+// pointer may also point into the file buffer.  F16 is converted to F32 at
+// load time (stored in weight_storage) because no fused F16 matmul is
+// provided.
+struct QuantWeight {
+    const void* data = nullptr;
+    GGMLType type = GGML_TYPE_F32;
+    bool valid() const { return data != nullptr; }
+};
+
 // ---- Backend selection ----
 
 enum class Backend {
@@ -165,6 +180,72 @@ inline void cpu_matmul_transposed(float* out, const float* x, const float* w, in
         const float* row = w + i * K;
         for (int k = 0; k < K; k++) {
             sum += x[k] * row[k];
+        }
+        out[i] = sum;
+    }
+}
+
+// Fused Q8_0 dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is in Q8_0 format: for every 32-element block, 2 bytes f16 scale then 32
+// int8 values (34 bytes total per block).  Weights are never expanded to F32
+// in memory — each scale+value pair is consumed once, keeping weight traffic
+// at ~1 byte/element instead of 4 bytes/element.
+inline void cpu_matmul_transposed_q8_0(float* out, const float* x,
+                                       const void* w, int N, int K) {
+    const int bytes_per_block = 34; // 2-byte f16 scale + 32 int8 values
+    const int blocks_per_row = K / 32;
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint8_t* row = wptr +
+            static_cast<size_t>(i) * blocks_per_row * bytes_per_block;
+        for (int b = 0; b < blocks_per_row; b++) {
+            uint16_t scale_h;
+            memcpy(&scale_h, row, 2);
+            float scale = fp16_to_fp32(scale_h);
+            const int8_t* vals = reinterpret_cast<const int8_t*>(row + 2);
+            const float* xb = x + b * 32;
+            for (int j = 0; j < 32; j++) {
+                sum += xb[j] * static_cast<float>(vals[j]) * scale;
+            }
+            row += bytes_per_block;
+        }
+        out[i] = sum;
+    }
+}
+
+// Fused Q4_0 dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is in Q4_0 format: for every 32-element block, 2 bytes f16 scale then 16
+// nibble bytes (18 bytes total per block).
+inline void cpu_matmul_transposed_q4_0(float* out, const float* x,
+                                       const void* w, int N, int K) {
+    const int bytes_per_block = 18; // 2-byte f16 scale + 16 nibble bytes
+    const int blocks_per_row = K / 32;
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint8_t* row = wptr +
+            static_cast<size_t>(i) * blocks_per_row * bytes_per_block;
+        for (int b = 0; b < blocks_per_row; b++) {
+            uint16_t scale_h;
+            memcpy(&scale_h, row, 2);
+            float scale = fp16_to_fp32(scale_h);
+            const uint8_t* nibbles = row + 2;
+            const float* xb = x + b * 32;
+            for (int j = 0; j < 16; j++) {
+                uint8_t byte = nibbles[j];
+                // Q4_0 stores 4-bit unsigned values in range [0,15], offset by
+                // 8 so that the represented range is [-8, 7].
+                sum += xb[j]      * (static_cast<float>(static_cast<int>(byte & 0x0F) - 8) * scale);
+                sum += xb[j + 16] * (static_cast<float>(static_cast<int>(byte >> 4)  - 8) * scale);
+            }
+            row += bytes_per_block;
         }
         out[i] = sum;
     }
@@ -329,12 +410,54 @@ struct Compute {
     void matmul_transposed(float* out, const float* x, const float* w, int N, int K) {
 #ifdef LLM_USE_CUDA
         if (backend == Backend::CUDA) {
-            // For CUDA, use standard matmul with M=1
-            cuda_matmul(out, x, w, 1, N, K);
+            cuda_matmul_transposed_weight(out, x, w, N, K);
             return;
         }
 #endif
         cpu_matmul_transposed(out, x, w, N, K);
+    }
+
+    // Transposed matmul dispatching on the weight's quantization type.
+    // For CPU, uses fused dequantize+accumulate kernels that keep weights in
+    // their compact format throughout (no temporary F32 expansion).
+    // For CUDA, falls back to an on-the-fly dequantize into a temporary buffer
+    // since the CUDA kernels currently expect float* inputs.
+    void matmul_transposed_q(float* out, const float* x,
+                             const QuantWeight& w, int N, int K) {
+#ifdef LLM_USE_CUDA
+        if (backend == Backend::CUDA) {
+            if (w.type == GGML_TYPE_F32) {
+                cuda_matmul_transposed_weight(out, x,
+                    static_cast<const float*>(w.data), N, K);
+            } else {
+                std::vector<float> tmp(static_cast<size_t>(N) * K);
+                dequantize(w.data, tmp.data(),
+                           static_cast<int64_t>(N) * K, w.type);
+                cuda_matmul_transposed_weight(out, x, tmp.data(), N, K);
+            }
+            return;
+        }
+#endif
+        switch (w.type) {
+            case GGML_TYPE_F32:
+                cpu_matmul_transposed(out, x,
+                    static_cast<const float*>(w.data), N, K);
+                break;
+            case GGML_TYPE_Q8_0:
+                cpu_matmul_transposed_q8_0(out, x, w.data, N, K);
+                break;
+            case GGML_TYPE_Q4_0:
+                cpu_matmul_transposed_q4_0(out, x, w.data, N, K);
+                break;
+            default: {
+                // Generic fallback for other quantized types
+                std::vector<float> tmp(static_cast<size_t>(N) * K);
+                dequantize(w.data, tmp.data(),
+                           static_cast<int64_t>(N) * K, w.type);
+                cpu_matmul_transposed(out, x, tmp.data(), N, K);
+                break;
+            }
+        }
     }
 
     void rmsnorm(float* out, const float* x, const float* w, int n, float eps) {

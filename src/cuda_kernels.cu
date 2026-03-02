@@ -49,6 +49,37 @@ void cuda_matmul(float* out, const float* a, const float* b, int M, int N, int K
     cudaFree(d_out);
 }
 
+// Compute out[1×N] = x[1×K] × W^T where W is row-major [N×K].
+// This is the transposed-weight matmul used for all projection layers.
+// cuBLAS CUBLAS_OP_T on W (passed as column-major [K×N]) produces W^T [N×K].
+void cuda_matmul_transposed_weight(float* out, const float* x,
+                                   const float* w, int N, int K) {
+    ensure_cublas();
+
+    float *d_x, *d_w, *d_out;
+    CUDA_CHECK(cudaMalloc(&d_x, K * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_w, (size_t)N * K * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out, N * sizeof(float)));
+
+    CUDA_CHECK(cudaMemcpy(d_x, x, K * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_w, w, (size_t)N * K * sizeof(float), cudaMemcpyHostToDevice));
+
+    float alpha = 1.0f, beta = 0.0f;
+    // W is row-major [N×K]. Passing to cuBLAS (column-major) with lda=K
+    // makes cuBLAS interpret it as a column-major [K×N] matrix (= W^T).
+    // CUBLAS_OP_T then transposes it back to [N×K], so the sgemm computes
+    // the column-major result d_out[N×1] = W_cm[K×N]^T * d_x[K×1] = W * x^T,
+    // which corresponds to the desired row-major out[1×N] = x * W^T.
+    cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                N, 1, K, &alpha, d_w, K, d_x, K, &beta, d_out, N);
+
+    CUDA_CHECK(cudaMemcpy(out, d_out, N * sizeof(float), cudaMemcpyDeviceToHost));
+
+    cudaFree(d_x);
+    cudaFree(d_w);
+    cudaFree(d_out);
+}
+
 // ---- RMS Norm kernel ----
 
 __global__ void rmsnorm_kernel(float* out, const float* x, const float* w, int n, float eps) {

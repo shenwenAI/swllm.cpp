@@ -311,6 +311,39 @@ int main(int argc, char** argv) {
     // Enable UTF-8 console I/O on Windows
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+
+    // Re-encode command-line arguments from their native UTF-16 representation
+    // to UTF-8.  On Windows, argv is transcoded from the process's Unicode
+    // command line using the current ANSI code page (e.g. GBK on Chinese
+    // systems), which corrupts non-ASCII characters such as Chinese text.
+    // CommandLineToArgvW retrieves the original UTF-16 arguments directly,
+    // giving us a reliable UTF-8 conversion regardless of the active code page.
+    std::vector<std::string> utf8_arg_storage;
+    std::vector<char*>       utf8_argv_storage;
+    {
+        int wargc = 0;
+        LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+        if (wargv && wargc == argc) {
+            utf8_arg_storage.reserve(wargc);
+            for (int i = 0; i < wargc; i++) {
+                // n includes the null terminator; n - 1 is the actual string length
+                int n = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1,
+                                            nullptr, 0, nullptr, nullptr);
+                std::string s(n > 0 ? static_cast<size_t>(n - 1) : 0u, '\0');
+                if (n > 1) {
+                    WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1,
+                                        &s[0], n - 1, nullptr, nullptr);
+                }
+                utf8_arg_storage.push_back(std::move(s));
+            }
+            LocalFree(wargv);
+        }
+        utf8_argv_storage.reserve(utf8_arg_storage.size());
+        for (auto& s : utf8_arg_storage) utf8_argv_storage.push_back(&s[0]);
+        if (static_cast<int>(utf8_argv_storage.size()) == argc) {
+            argv = utf8_argv_storage.data();
+        }
+    }
 #endif
 
     RunConfig cfg;

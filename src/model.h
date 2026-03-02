@@ -37,25 +37,25 @@ struct ModelConfig {
 
 struct LayerWeights {
     float* attn_norm = nullptr;     // [hidden_size]
-    float* wq = nullptr;            // [num_heads * head_dim, hidden_size]
-    float* wk = nullptr;            // [num_kv_heads * head_dim, hidden_size]
-    float* wv = nullptr;            // [num_kv_heads * head_dim, hidden_size]
-    float* wo = nullptr;            // [hidden_size, num_heads * head_dim]
+    QuantWeight wq;                 // [num_heads * head_dim, hidden_size]
+    QuantWeight wk;                 // [num_kv_heads * head_dim, hidden_size]
+    QuantWeight wv;                 // [num_kv_heads * head_dim, hidden_size]
+    QuantWeight wo;                 // [hidden_size, num_heads * head_dim]
     float* bq = nullptr;            // [num_heads * head_dim] (optional, Qwen3)
     float* bk = nullptr;            // [num_kv_heads * head_dim] (optional, Qwen3)
     float* bv = nullptr;            // [num_kv_heads * head_dim] (optional, Qwen3)
     float* attn_q_norm = nullptr;   // [head_dim] (optional, Qwen3 QK-norm)
     float* attn_k_norm = nullptr;   // [head_dim] (optional, Qwen3 QK-norm)
     float* ffn_norm = nullptr;      // [hidden_size]
-    float* w_gate = nullptr;        // [intermediate_size, hidden_size]
-    float* w_up = nullptr;          // [intermediate_size, hidden_size]
-    float* w_down = nullptr;        // [hidden_size, intermediate_size]
+    QuantWeight w_gate;             // [intermediate_size, hidden_size]
+    QuantWeight w_up;               // [intermediate_size, hidden_size]
+    QuantWeight w_down;             // [hidden_size, intermediate_size]
 };
 
 struct ModelWeights {
-    float* token_embd = nullptr;    // [vocab_size, hidden_size]
+    float* token_embd = nullptr;    // [vocab_size, hidden_size] (kept as F32 for embedding lookup)
     float* output_norm = nullptr;   // [hidden_size]
-    float* output = nullptr;        // [vocab_size, hidden_size]
+    QuantWeight output;             // [vocab_size, hidden_size]
     std::vector<LayerWeights> layers;
 };
 
@@ -166,7 +166,7 @@ public:
         // Estimate memory usage
         double kv_cache_mb = 2.0 * config.num_layers * config.max_seq_len
                              * config.kv_dim * sizeof(float) / (1024.0 * 1024.0);
-        double weights_mb = count_parameters() * sizeof(float) / (1024.0 * 1024.0);
+        double weights_mb = count_weight_bytes() / (1024.0 * 1024.0);
         fprintf(stderr, "  Memory estimate: weights=%.0fMB, kv_cache=%.0fMB\n",
                 weights_mb, kv_cache_mb);
 
@@ -198,12 +198,12 @@ public:
                             config.rms_norm_eps);
 
             // QKV projections
-            compute.matmul_transposed(q.data(), xb.data(), lw.wq,
-                                      num_heads * head_dim, dim);
-            compute.matmul_transposed(k.data(), xb.data(), lw.wk,
-                                      num_kv_heads * head_dim, dim);
-            compute.matmul_transposed(v.data(), xb.data(), lw.wv,
-                                      num_kv_heads * head_dim, dim);
+            compute.matmul_transposed_q(q.data(), xb.data(), lw.wq,
+                                        num_heads * head_dim, dim);
+            compute.matmul_transposed_q(k.data(), xb.data(), lw.wk,
+                                        num_kv_heads * head_dim, dim);
+            compute.matmul_transposed_q(v.data(), xb.data(), lw.wv,
+                                        num_kv_heads * head_dim, dim);
 
             // Add QKV bias (Qwen3-style models)
             if (lw.bq) compute.add(q.data(), q.data(), lw.bq, num_heads * head_dim);
@@ -278,8 +278,8 @@ public:
             }
 
             // Output projection
-            compute.matmul_transposed(xb.data(), xb2.data(), lw.wo, dim,
-                                      num_heads * head_dim);
+            compute.matmul_transposed_q(xb.data(), xb2.data(), lw.wo, dim,
+                                        num_heads * head_dim);
 
             // Residual connection
             compute.add(x.data(), x.data(), xb.data(), dim);
@@ -289,14 +289,14 @@ public:
                             config.rms_norm_eps);
 
             // Feed-forward network (SwiGLU)
-            compute.matmul_transposed(hb.data(), xb.data(), lw.w_gate,
-                                      config.intermediate_size, dim);
-            compute.matmul_transposed(hb2.data(), xb.data(), lw.w_up,
-                                      config.intermediate_size, dim);
+            compute.matmul_transposed_q(hb.data(), xb.data(), lw.w_gate,
+                                        config.intermediate_size, dim);
+            compute.matmul_transposed_q(hb2.data(), xb.data(), lw.w_up,
+                                        config.intermediate_size, dim);
             compute.silu_mul(hb.data(), hb.data(), hb2.data(),
                              config.intermediate_size);
-            compute.matmul_transposed(xb.data(), hb.data(), lw.w_down,
-                                      dim, config.intermediate_size);
+            compute.matmul_transposed_q(xb.data(), hb.data(), lw.w_down,
+                                        dim, config.intermediate_size);
 
             // Residual connection
             compute.add(x.data(), x.data(), xb.data(), dim);
@@ -307,8 +307,8 @@ public:
                         config.rms_norm_eps);
 
         // Output projection to vocab
-        compute.matmul_transposed(logits.data(), x.data(), weights.output,
-                                  config.vocab_size, dim);
+        compute.matmul_transposed_q(logits.data(), x.data(), weights.output,
+                                    config.vocab_size, dim);
 
         return logits.data();
     }
@@ -336,6 +336,21 @@ public:
             n += static_cast<double>(config.hidden_size) * config.intermediate_size; // w_down
         }
         return n;
+    }
+
+    // Returns total weight storage in bytes using the actual quantization types
+    // recorded in the GGUF file.  More accurate than count_parameters()*4
+    // when the model uses Q4_0 or Q8_0 weights.
+    double count_weight_bytes() const {
+        double bytes = 0;
+        for (const auto& kv : gguf.tensors) {
+            const auto& info = kv.second;
+            size_t n = info.num_elements();
+            size_t block_size = ggml_block_size(info.type);
+            size_t type_size  = ggml_type_size(info.type);
+            bytes += static_cast<double>(n / block_size) * type_size;
+        }
+        return bytes;
     }
 
 private:
@@ -430,6 +445,50 @@ private:
         return data;
     }
 
+    // Load a weight tensor keeping it in its native quantization format.
+    // For Q4_0/Q8_0/F32: returns a pointer directly into the GGUF file buffer
+    // (no copy, no allocation).  For F16: dequantizes to F32 in weight_storage
+    // (no fused F16 matmul kernel is provided).
+    // This is used for large projection matrices to preserve memory bandwidth.
+    QuantWeight load_tensor_raw(const std::string& name,
+                                int64_t expected_elements = -1,
+                                bool optional = false) {
+        auto it = gguf.tensors.find(name);
+        if (it == gguf.tensors.end()) {
+            if (!optional) {
+                fprintf(stderr, "Warning: tensor '%s' not found\n", name.c_str());
+            }
+            return {};
+        }
+
+        const GGUFTensorInfo& info = it->second;
+        int64_t n = static_cast<int64_t>(info.num_elements());
+
+        if (expected_elements > 0 && n != expected_elements) {
+            fprintf(stderr, "Warning: tensor '%s' has %ld elements, expected %ld\n",
+                    name.c_str(), static_cast<long>(n), static_cast<long>(expected_elements));
+        }
+
+        const void* raw = gguf.get_tensor_data(name);
+        if (!raw) {
+            fprintf(stderr, "Error: cannot get data for tensor '%s'\n", name.c_str());
+            return {};
+        }
+
+        if (info.type == GGML_TYPE_F16) {
+            // No fused F16 matmul kernel — convert to F32 once at load time
+            weight_storage.emplace_back(n);
+            float* fdata = weight_storage.back().data();
+            dequantize_f16(raw, fdata, n);
+            return {fdata, GGML_TYPE_F32};
+        }
+
+        // F32 and integer-quantized types: use the raw GGUF pointer directly.
+        // gguf.owned_data (or the mmap region) owns this memory and lives as
+        // long as the Model object does.
+        return {raw, info.type};
+    }
+
     bool load_weights() {
         int dim = config.hidden_size;
         int kv_dim = config.kv_dim;
@@ -440,12 +499,12 @@ private:
         weights.token_embd = load_tensor("token_embd.weight",
             static_cast<int64_t>(config.vocab_size) * dim);
         weights.output_norm = load_tensor("output_norm.weight", dim);
-        weights.output = load_tensor("output.weight",
+        weights.output = load_tensor_raw("output.weight",
             static_cast<int64_t>(config.vocab_size) * dim, true);
 
         // If output weights are not present, use token embeddings (weight tying)
-        if (!weights.output) {
-            weights.output = weights.token_embd;
+        if (!weights.output.valid()) {
+            weights.output = {weights.token_embd, GGML_TYPE_F32};
         }
 
         if (!weights.token_embd || !weights.output_norm) {
@@ -458,13 +517,13 @@ private:
             std::string prefix = "blk." + std::to_string(l) + ".";
 
             weights.layers[l].attn_norm = load_tensor(prefix + "attn_norm.weight", dim);
-            weights.layers[l].wq = load_tensor(prefix + "attn_q.weight",
+            weights.layers[l].wq = load_tensor_raw(prefix + "attn_q.weight",
                 static_cast<int64_t>(n_heads) * head_dim * dim);
-            weights.layers[l].wk = load_tensor(prefix + "attn_k.weight",
+            weights.layers[l].wk = load_tensor_raw(prefix + "attn_k.weight",
                 static_cast<int64_t>(kv_dim) * dim);
-            weights.layers[l].wv = load_tensor(prefix + "attn_v.weight",
+            weights.layers[l].wv = load_tensor_raw(prefix + "attn_v.weight",
                 static_cast<int64_t>(kv_dim) * dim);
-            weights.layers[l].wo = load_tensor(prefix + "attn_output.weight",
+            weights.layers[l].wo = load_tensor_raw(prefix + "attn_output.weight",
                 static_cast<int64_t>(dim) * n_heads * head_dim);
 
             // Load QKV biases (optional, used by Qwen3-style models)
@@ -486,18 +545,26 @@ private:
                 static_cast<int64_t>(head_dim), true);
 
             weights.layers[l].ffn_norm = load_tensor(prefix + "ffn_norm.weight", dim);
-            weights.layers[l].w_gate = load_tensor(prefix + "ffn_gate.weight",
+            weights.layers[l].w_gate = load_tensor_raw(prefix + "ffn_gate.weight",
                 static_cast<int64_t>(ffn) * dim);
-            weights.layers[l].w_up = load_tensor(prefix + "ffn_up.weight",
+            weights.layers[l].w_up = load_tensor_raw(prefix + "ffn_up.weight",
                 static_cast<int64_t>(ffn) * dim);
-            weights.layers[l].w_down = load_tensor(prefix + "ffn_down.weight",
+            weights.layers[l].w_down = load_tensor_raw(prefix + "ffn_down.weight",
                 static_cast<int64_t>(dim) * ffn);
 
-            if (!weights.layers[l].attn_norm || !weights.layers[l].wq ||
-                !weights.layers[l].wk || !weights.layers[l].wv ||
-                !weights.layers[l].wo || !weights.layers[l].ffn_norm ||
-                !weights.layers[l].w_gate || !weights.layers[l].w_up ||
-                !weights.layers[l].w_down) {
+            // Norm/bias weights stay as float* (they are always F32 or F16 in
+            // real GGUF files and are only accessed by rmsnorm/add, which
+            // take float*).  Large projection matrices use QuantWeight so the
+            // fused kernels can operate on them in their native format.
+            if (!weights.layers[l].attn_norm ||
+                !weights.layers[l].wq.valid() ||
+                !weights.layers[l].wk.valid() ||
+                !weights.layers[l].wv.valid() ||
+                !weights.layers[l].wo.valid() ||
+                !weights.layers[l].ffn_norm ||
+                !weights.layers[l].w_gate.valid() ||
+                !weights.layers[l].w_up.valid() ||
+                !weights.layers[l].w_down.valid()) {
                 fprintf(stderr, "Error: missing weights for layer %d\n", l);
                 return false;
             }

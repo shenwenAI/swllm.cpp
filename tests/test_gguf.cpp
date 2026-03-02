@@ -235,6 +235,49 @@ void test_cpu_matmul_transposed() {
     PASS();
 }
 
+void test_cpu_matmul_transposed_q8_0() {
+    TEST(cpu_matmul_transposed_q8_0);
+
+    // Build a 2×32 weight matrix in Q8_0 format (N=2, K=32).
+    // Q8_0 block layout: 2 bytes f16 scale, then 32 int8 values = 34 bytes/block.
+    //
+    // Row 0: scale=1.0 (f16=0x3C00), values=[1,2,...,32]
+    // Row 1: scale=2.0 (f16=0x4000), values=[1,2,...,32]
+    const int N = 2, K = 32;
+    const int bytes_per_block = 34; // 2-byte f16 scale + 32 int8 values
+    std::vector<uint8_t> w_q8(static_cast<size_t>(N) * bytes_per_block);
+
+    uint16_t scale1 = 0x3C00; // 1.0 in f16
+    memcpy(w_q8.data(), &scale1, 2);
+    for (int j = 0; j < 32; j++) w_q8[2 + j] = static_cast<uint8_t>(j + 1);
+
+    uint16_t scale2 = 0x4000; // 2.0 in f16
+    memcpy(w_q8.data() + bytes_per_block, &scale2, 2);
+    for (int j = 0; j < 32; j++) w_q8[bytes_per_block + 2 + j] = static_cast<uint8_t>(j + 1);
+
+    // x = [1, 1, ..., 1]  (K=32 ones)
+    std::vector<float> x(K, 1.0f);
+    std::vector<float> out(N, 0.0f);
+
+    cpu_matmul_transposed_q8_0(out.data(), x.data(), w_q8.data(), N, K);
+
+    // Expected: sum(j=1..32) * scale
+    // out[0] = 1.0 * (1+2+...+32) = 528
+    // out[1] = 2.0 * (1+2+...+32) = 1056
+    ASSERT_NEAR(out[0], 528.0f, 0.5f);
+    ASSERT_NEAR(out[1], 1056.0f, 0.5f);
+
+    // Cross-check: dequantize then matmul must give the same result
+    std::vector<float> w_f32(static_cast<size_t>(N) * K);
+    dequantize(w_q8.data(), w_f32.data(), static_cast<int64_t>(N) * K, GGML_TYPE_Q8_0);
+    std::vector<float> out_ref(N, 0.0f);
+    cpu_matmul_transposed(out_ref.data(), x.data(), w_f32.data(), N, K);
+    ASSERT_NEAR(out[0], out_ref[0], 1e-4f);
+    ASSERT_NEAR(out[1], out_ref[1], 1e-4f);
+
+    PASS();
+}
+
 void test_cpu_silu() {
     TEST(cpu_silu);
 
@@ -873,6 +916,60 @@ void test_special_token_encode() {
     PASS();
 }
 
+// Verify that a newline is always its own BPE chunk and is never merged into
+// the following text.  In Qwen's tiktoken pre-tokenisation, \n matches
+// \s*[\r\n]+ as a separate unit; if we instead let it attach to the next
+// word (the old bug), a spurious low-rank merge of the encoded newline
+// symbol with the first symbol of the following word would fire and produce
+// a completely wrong token — exactly the garbled-Chinese bug reported on
+// Windows.
+void test_gpt2_newline_chunking() {
+    TEST(gpt2_newline_chunking);
+
+    Tokenizer tok;
+    tok.tokenizer_model = "gpt2";
+    tok.init_gpt2_byte_mapping();
+
+    // '\n' (byte 0x0A) is NOT in the safe range; it maps to codepoint 266
+    // (0x10A = Ċ), whose UTF-8 encoding is "\xC4\x8A".
+    std::string nl_enc = std::string("\xC4\x8A"); // GPT-2 encoded '\n'
+
+    std::vector<std::string> vocab_tokens = {
+        "h", "e", "l", "o",               // 0-3: single ASCII letters
+        nl_enc,                            // 4: encoded '\n'  (Ċ)
+        nl_enc + "h",                      // 5: wrong merged token "Ċh"
+        "he", "hel", "hell", "hello",      // 6-9: BPE-merged forms of "hello"
+    };
+
+    tok.vocab_size = static_cast<int>(vocab_tokens.size());
+    tok.id_to_token = vocab_tokens;
+    for (int i = 0; i < tok.vocab_size; i++) {
+        tok.token_to_id[tok.id_to_token[i]] = i;
+    }
+    tok.bos_token_id = -1;
+
+    // Give the (newline-enc + 'h') pair rank 0 — the highest BPE priority.
+    // If '\n' and "hello" are ever in the same chunk this merge fires first,
+    // producing the wrong token 5 ("Ċh") and leaving the rest unmerged.
+    tok.merge_ranks[nl_enc + " h"] = 0; // rank 0 = highest priority
+    tok.merge_ranks["h e"]         = 1;
+    tok.merge_ranks["he l"]        = 2;
+    tok.merge_ranks["hel l"]       = 3;
+    tok.merge_ranks["hell o"]      = 4;
+    tok.merges.push_back({"h", "e", 1});
+
+    // "\nhello" must encode as [nl_token(4), hello_token(9)].
+    // With the old bug '\n' and "hello" share a chunk, "Ċ h" merges at
+    // rank 0 and the result starts with wrong token 5 instead of 4.
+    auto tokens = tok.encode("\nhello", false);
+
+    ASSERT_EQ(static_cast<int>(tokens.size()), 2);
+    ASSERT_EQ(tokens[0], 4); // encoded '\n' → token 4
+    ASSERT_EQ(tokens[1], 9); // "hello" fully merged → token 9
+
+    PASS();
+}
+
 // ---- Run all tests ----
 
 int main() {
@@ -890,6 +987,7 @@ int main() {
     test_cpu_softmax();
     test_cpu_matmul();
     test_cpu_matmul_transposed();
+    test_cpu_matmul_transposed_q8_0();
     test_cpu_silu();
     test_cpu_add();
     test_cpu_rope();
@@ -922,6 +1020,7 @@ int main() {
     test_eos_token_ids();
     test_context_auto_cap();
     test_special_token_encode();
+    test_gpt2_newline_chunking();
 
     fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
             tests_passed, tests_failed);

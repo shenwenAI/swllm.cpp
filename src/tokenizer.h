@@ -420,18 +420,34 @@ private:
     void bpe_encode_gpt2_segment(const std::string& text, std::vector<int>& tokens) const {
         if (text.empty()) return;
 
-        // Pre-tokenize: split at whitespace boundaries, keeping space
-        // attached to the beginning of the following word
+        // Pre-tokenize following GPT-2/tiktoken conventions:
+        //   - Newlines (\n, \r) always form their own standalone chunk so they
+        //     are never merged with preceding or following text by BPE.  Qwen's
+        //     tiktoken regex matches them via \s*[\r\n]+ as a separate unit.
+        //   - A regular space can act as a prefix for the next word chunk
+        //     (producing tokens like "Ġhello"), matching GPT-2 behaviour.
         std::vector<std::string> chunks;
         std::string current;
         for (size_t i = 0; i < text.size(); i++) {
             uint8_t c = static_cast<uint8_t>(text[i]);
-            bool is_ws = (c == ' ' || c == '\n' || c == '\r' || c == '\t');
-            if (is_ws && !current.empty()) {
-                chunks.push_back(current);
-                current.clear();
+            if (c == '\n' || c == '\r') {
+                // Flush any accumulated text, then push the newline as its own chunk
+                if (!current.empty()) {
+                    chunks.push_back(current);
+                    current.clear();
+                }
+                chunks.push_back(std::string(1, static_cast<char>(c)));
+            } else {
+                if ((c == ' ' || c == '\t') && !current.empty() &&
+                    static_cast<uint8_t>(current[0]) != ' ' &&
+                    static_cast<uint8_t>(current[0]) != '\t') {
+                    // Space/tab: flush non-whitespace current so the space
+                    // becomes the prefix of the next word chunk
+                    chunks.push_back(current);
+                    current.clear();
+                }
+                current += text[i];
             }
-            current += text[i];
         }
         if (!current.empty()) chunks.push_back(current);
 
