@@ -48,7 +48,9 @@ endif()
 
 if(LLM_CUDA)
     target_link_libraries(llm PRIVATE CUDA::cudart CUDA::cublas)
-    set_target_properties(llm PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set_target_properties(llm PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
+    endif()
 endif()
 
 # Math library on Linux
