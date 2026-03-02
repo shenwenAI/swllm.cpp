@@ -118,7 +118,7 @@ public:
 
     explicit Model(Backend backend) : compute(backend) {}
 
-    bool load(const std::string& model_path) {
+    bool load(const std::string& model_path, int context_override = 0) {
         fprintf(stderr, "Loading model from: %s\n", model_path.c_str());
 
         if (!gguf.load(model_path)) {
@@ -132,6 +132,13 @@ public:
 
         // Read model configuration from metadata
         if (!load_config()) return false;
+
+        // Override context length if requested
+        if (context_override > 0 && context_override < config.max_seq_len) {
+            fprintf(stderr, "Context length capped: %d -> %d\n",
+                    config.max_seq_len, context_override);
+            config.max_seq_len = context_override;
+        }
 
         // Load tokenizer
         if (!tokenizer.load_from_gguf(gguf)) return false;
@@ -151,6 +158,14 @@ public:
                 config.hidden_size, config.intermediate_size, config.vocab_size);
         fprintf(stderr, "  Context: %d, RoPE theta: %.0f\n",
                 config.max_seq_len, config.rope_theta);
+
+        // Estimate memory usage
+        double kv_cache_mb = 2.0 * config.num_layers * config.max_seq_len
+                             * config.kv_dim * sizeof(float) / (1024.0 * 1024.0);
+        double weights_mb = count_parameters() * sizeof(float) / (1024.0 * 1024.0);
+        fprintf(stderr, "  Memory estimate: weights=%.0fMB, kv_cache=%.0fMB\n",
+                weights_mb, kv_cache_mb);
+
         if (config.qkv_bias) {
             fprintf(stderr, "  QKV bias: enabled (Qwen3-style)\n");
         }

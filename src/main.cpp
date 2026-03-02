@@ -16,6 +16,7 @@ struct RunConfig {
     std::string model_path;
     std::string prompt = "Hello";
     int max_tokens = 256;
+    int context_len = 0;  // 0 = use model default
     bool use_gpu = false;
     int num_threads = 0;  // 0 = auto
     SamplerConfig sampler;
@@ -35,6 +36,7 @@ static void print_usage(const char* prog) {
         "Generation options:\n"
         "  -p, --prompt <text>      Input prompt (default: \"Hello\")\n"
         "  -n, --max-tokens <N>     Max tokens to generate (default: 256)\n"
+        "  -c, --context <N>        Max context length (default: model's value)\n"
         "  -t, --temperature <F>    Sampling temperature (default: 0.8)\n"
         "  --top-k <N>              Top-K sampling (default: 40)\n"
         "  --top-p <F>              Top-P nucleus sampling (default: 0.9)\n"
@@ -67,6 +69,8 @@ static bool parse_args(int argc, char** argv, RunConfig& cfg) {
             cfg.prompt = argv[++i];
         } else if ((arg == "-n" || arg == "--max-tokens") && i + 1 < argc) {
             cfg.max_tokens = atoi(argv[++i]);
+        } else if ((arg == "-c" || arg == "--context") && i + 1 < argc) {
+            cfg.context_len = atoi(argv[++i]);
         } else if ((arg == "-t" || arg == "--temperature") && i + 1 < argc) {
             cfg.sampler.temperature = static_cast<float>(atof(argv[++i]));
         } else if (arg == "--top-k" && i + 1 < argc) {
@@ -239,7 +243,7 @@ int main(int argc, char** argv) {
 
     // Load model
     Model model(backend);
-    if (!model.load(cfg.model_path)) {
+    if (!model.load(cfg.model_path, cfg.context_len)) {
         fprintf(stderr, "Failed to load model from: %s\n", cfg.model_path.c_str());
         return 1;
     }

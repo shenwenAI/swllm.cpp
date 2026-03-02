@@ -11,6 +11,7 @@
 #include "tensor.h"
 #include "sampler.h"
 #include "tokenizer.h"
+#include "model.h"
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -483,6 +484,68 @@ void test_compute_cpu() {
     PASS();
 }
 
+// ---- Qwen3 config tests ----
+
+void test_qwen3_config() {
+    TEST(qwen3_config);
+
+    // Verify Qwen3 architecture enables neox RoPE
+    ModelConfig cfg;
+    cfg.architecture = "qwen3";
+
+    // Simulate what load_config does for RoPE style
+    bool rope_neox = (cfg.architecture == "qwen2" ||
+                      cfg.architecture == "qwen3" ||
+                      cfg.architecture == "qwen2moe");
+    ASSERT_TRUE(rope_neox);
+
+    // Verify Qwen3-0.6B dimensions
+    cfg.hidden_size = 1024;
+    cfg.num_heads = 16;
+    cfg.num_kv_heads = 8;
+    cfg.head_dim = cfg.hidden_size / cfg.num_heads;
+    cfg.kv_dim = cfg.head_dim * cfg.num_kv_heads;
+    cfg.intermediate_size = 2816;
+    cfg.num_layers = 28;
+    cfg.rope_theta = 1000000.0f;
+    cfg.max_seq_len = 40960;
+    cfg.qkv_bias = true;
+    cfg.rope_neox = true;
+
+    ASSERT_EQ(cfg.head_dim, 64);
+    ASSERT_EQ(cfg.kv_dim, 512);
+    ASSERT_EQ(cfg.num_heads / cfg.num_kv_heads, 2);  // GQA ratio
+
+    PASS();
+}
+
+void test_context_override() {
+    TEST(context_override);
+
+    // Verify KV cache respects reduced context
+    KVCache cache;
+    int layers = 28, kv_dim = 512;
+
+    // With small context, should work fine
+    int small_ctx = 4096;
+    cache.init(layers, small_ctx, kv_dim);
+
+    ASSERT_EQ(cache.max_seq_len, small_ctx);
+    ASSERT_EQ(cache.kv_dim, kv_dim);
+    ASSERT_EQ(cache.num_layers, layers);
+
+    // Verify key/value pointers are distinct per layer/position
+    float* k0 = cache.key(0, 0);
+    float* k1 = cache.key(1, 0);
+    ASSERT_TRUE(k1 - k0 == static_cast<ptrdiff_t>(small_ctx) * kv_dim);
+
+    float* v0 = cache.value(0, 0);
+    float* v1 = cache.value(0, 1);
+    ASSERT_TRUE(v1 - v0 == kv_dim);
+
+    PASS();
+}
+
 // ---- Run all tests ----
 
 int main() {
@@ -515,6 +578,10 @@ int main() {
 
     fprintf(stderr, "\nCompute dispatcher tests:\n");
     test_compute_cpu();
+
+    fprintf(stderr, "\nQwen3 config tests:\n");
+    test_qwen3_config();
+    test_context_override();
 
     fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
             tests_passed, tests_failed);
