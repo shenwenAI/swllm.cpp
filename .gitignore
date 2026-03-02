@@ -25,4 +25,5 @@ Thumbs.db
 # Model files (too large for git)
 *.gguf
 *.bin
-models/
+models/_codeql_build_dir/
+_codeql_detected_source_root
