@@ -43,6 +43,8 @@ struct LayerWeights {
     float* bq = nullptr;            // [num_heads * head_dim] (optional, Qwen3)
     float* bk = nullptr;            // [num_kv_heads * head_dim] (optional, Qwen3)
     float* bv = nullptr;            // [num_kv_heads * head_dim] (optional, Qwen3)
+    float* attn_q_norm = nullptr;   // [head_dim] (optional, Qwen3 QK-norm)
+    float* attn_k_norm = nullptr;   // [head_dim] (optional, Qwen3 QK-norm)
     float* ffn_norm = nullptr;      // [hidden_size]
     float* w_gate = nullptr;        // [intermediate_size, hidden_size]
     float* w_up = nullptr;          // [intermediate_size, hidden_size]
@@ -187,6 +189,24 @@ public:
             if (lw.bq) compute.add(q.data(), q.data(), lw.bq, num_heads * head_dim);
             if (lw.bk) compute.add(k.data(), k.data(), lw.bk, kv_dim);
             if (lw.bv) compute.add(v.data(), v.data(), lw.bv, kv_dim);
+
+            // Apply QK-norm: per-head RMSNorm on Q and K (Qwen3-style)
+            if (lw.attn_q_norm) {
+                for (int h = 0; h < num_heads; h++) {
+                    compute.rmsnorm(q.data() + h * head_dim,
+                                    q.data() + h * head_dim,
+                                    lw.attn_q_norm, head_dim,
+                                    config.rms_norm_eps);
+                }
+            }
+            if (lw.attn_k_norm) {
+                for (int h = 0; h < num_kv_heads; h++) {
+                    compute.rmsnorm(k.data() + h * head_dim,
+                                    k.data() + h * head_dim,
+                                    lw.attn_k_norm, head_dim,
+                                    config.rms_norm_eps);
+                }
+            }
 
             // Apply RoPE (separate Q and K dims for GQA correctness)
             compute.rope(q.data(), k.data(), num_heads * head_dim,
@@ -424,6 +444,12 @@ private:
             if (l == 0 && weights.layers[l].bq) {
                 config.qkv_bias = true;
             }
+
+            // Load QK-norm weights (optional, used by Qwen3-style models)
+            weights.layers[l].attn_q_norm = load_tensor(prefix + "attn_q_norm.weight",
+                static_cast<int64_t>(head_dim));
+            weights.layers[l].attn_k_norm = load_tensor(prefix + "attn_k_norm.weight",
+                static_cast<int64_t>(head_dim));
 
             weights.layers[l].ffn_norm = load_tensor(prefix + "ffn_norm.weight", dim);
             weights.layers[l].w_gate = load_tensor(prefix + "ffn_gate.weight",

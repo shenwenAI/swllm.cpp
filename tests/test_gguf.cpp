@@ -340,6 +340,35 @@ void test_qkv_bias_add() {
     PASS();
 }
 
+void test_qk_norm() {
+    TEST(qk_norm);
+
+    // Simulate per-head QK-norm (Qwen3-style)
+    // 2 heads, head_dim=2: Q = [h0: 3,4, h1: 1,2]
+    float q[] = {3.0f, 4.0f, 1.0f, 2.0f};
+    float norm_w[] = {1.0f, 1.0f}; // unit weights
+    int num_heads = 2;
+    int head_dim = 2;
+    float eps = 1e-5f;
+
+    // Apply per-head RMSNorm
+    for (int h = 0; h < num_heads; h++) {
+        cpu_rmsnorm(q + h * head_dim, q + h * head_dim, norm_w, head_dim, eps);
+    }
+
+    // Head 0: RMS = sqrt((9+16)/2) = sqrt(12.5), scale = 1/sqrt(12.5)
+    float rms0 = sqrtf((9.0f + 16.0f) / 2.0f + eps);
+    ASSERT_NEAR(q[0], 3.0f / rms0, 1e-4f);
+    ASSERT_NEAR(q[1], 4.0f / rms0, 1e-4f);
+
+    // Head 1: RMS = sqrt((1+4)/2) = sqrt(2.5), scale = 1/sqrt(2.5)
+    float rms1 = sqrtf((1.0f + 4.0f) / 2.0f + eps);
+    ASSERT_NEAR(q[2], 1.0f / rms1, 1e-4f);
+    ASSERT_NEAR(q[3], 2.0f / rms1, 1e-4f);
+
+    PASS();
+}
+
 // ---- Sampler tests ----
 
 void test_sampler_greedy() {
@@ -434,6 +463,7 @@ int main() {
     test_cpu_rope();
     test_cpu_rope_gqa();
     test_qkv_bias_add();
+    test_qk_norm();
 
     fprintf(stderr, "\nSampler tests:\n");
     test_sampler_greedy();
