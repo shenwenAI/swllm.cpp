@@ -199,6 +199,9 @@ inline float silu(float x) {
 
 // SiLU element-wise multiply: out = silu(gate) * up
 inline void cpu_silu_elementwise_mul(float* out, const float* gate, const float* up, int n) {
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
     for (int i = 0; i < n; i++) {
         out[i] = silu(gate[i]) * up[i];
     }
@@ -208,30 +211,48 @@ inline void cpu_silu_elementwise_mul(float* out, const float* gate, const float*
 // Pairs consecutive elements: (0,1), (2,3), ...
 // q_dim and k_dim may differ when using GQA (grouped query attention)
 inline void cpu_rope(float* q, float* k, int q_dim, int k_dim, int head_dim, int pos, float theta) {
-    // Apply to query
-    for (int i = 0; i < q_dim; i += 2) {
-        int head_offset = i % head_dim;
-        float freq = 1.0f / powf(theta, static_cast<float>(head_offset) / head_dim);
-        float angle = pos * freq;
-        float cos_val = cosf(angle);
-        float sin_val = sinf(angle);
+    int q_heads = q_dim / head_dim;
+    int k_heads = k_dim / head_dim;
+    int half_dim = head_dim / 2;
 
-        float q0 = q[i], q1 = q[i + 1];
-        q[i]     = q0 * cos_val - q1 * sin_val;
-        q[i + 1] = q0 * sin_val + q1 * cos_val;
+    // Precompute per-dimension frequencies (shared across all heads)
+    std::vector<float> freqs(half_dim);
+    for (int j = 0; j < half_dim; j++) {
+        freqs[j] = 1.0f / powf(theta, static_cast<float>(2 * j) / head_dim);
+    }
+
+    // Apply to query
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int h = 0; h < q_heads; h++) {
+        float* qh = q + h * head_dim;
+        for (int i = 0; i < head_dim; i += 2) {
+            float angle = pos * freqs[i / 2];
+            float cos_val = cosf(angle);
+            float sin_val = sinf(angle);
+
+            float q0 = qh[i], q1 = qh[i + 1];
+            qh[i]     = q0 * cos_val - q1 * sin_val;
+            qh[i + 1] = q0 * sin_val + q1 * cos_val;
+        }
     }
 
     // Apply to key
-    for (int i = 0; i < k_dim; i += 2) {
-        int head_offset = i % head_dim;
-        float freq = 1.0f / powf(theta, static_cast<float>(head_offset) / head_dim);
-        float angle = pos * freq;
-        float cos_val = cosf(angle);
-        float sin_val = sinf(angle);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int h = 0; h < k_heads; h++) {
+        float* kh = k + h * head_dim;
+        for (int i = 0; i < head_dim; i += 2) {
+            float angle = pos * freqs[i / 2];
+            float cos_val = cosf(angle);
+            float sin_val = sinf(angle);
 
-        float k0 = k[i], k1 = k[i + 1];
-        k[i]     = k0 * cos_val - k1 * sin_val;
-        k[i + 1] = k0 * sin_val + k1 * cos_val;
+            float k0 = kh[i], k1 = kh[i + 1];
+            kh[i]     = k0 * cos_val - k1 * sin_val;
+            kh[i + 1] = k0 * sin_val + k1 * cos_val;
+        }
     }
 }
 
@@ -240,13 +261,21 @@ inline void cpu_rope(float* q, float* k, int q_dim, int k_dim, int head_dim, int
 inline void cpu_rope_neox(float* q, float* k, int q_dim, int k_dim, int head_dim, int pos, float theta) {
     int half_dim = head_dim / 2;
 
+    // Precompute per-dimension frequencies (shared across all heads)
+    std::vector<float> freqs(half_dim);
+    for (int i = 0; i < half_dim; i++) {
+        freqs[i] = 1.0f / powf(theta, static_cast<float>(2 * i) / head_dim);
+    }
+
     // Apply to query
     int q_heads = q_dim / head_dim;
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
     for (int h = 0; h < q_heads; h++) {
         float* qh = q + h * head_dim;
         for (int i = 0; i < half_dim; i++) {
-            float freq = 1.0f / powf(theta, static_cast<float>(2 * i) / head_dim);
-            float angle = pos * freq;
+            float angle = pos * freqs[i];
             float cos_val = cosf(angle);
             float sin_val = sinf(angle);
 
@@ -258,11 +287,13 @@ inline void cpu_rope_neox(float* q, float* k, int q_dim, int k_dim, int head_dim
 
     // Apply to key
     int k_heads = k_dim / head_dim;
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
     for (int h = 0; h < k_heads; h++) {
         float* kh = k + h * head_dim;
         for (int i = 0; i < half_dim; i++) {
-            float freq = 1.0f / powf(theta, static_cast<float>(2 * i) / head_dim);
-            float angle = pos * freq;
+            float angle = pos * freqs[i];
             float cos_val = cosf(angle);
             float sin_val = sinf(angle);
 

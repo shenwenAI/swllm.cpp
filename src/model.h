@@ -212,6 +212,9 @@ public:
 
             // Apply QK-norm: per-head RMSNorm on Q and K (Qwen3-style)
             if (lw.attn_q_norm) {
+                #ifdef LLM_USE_OPENMP
+                #pragma omp parallel for
+                #endif
                 for (int h = 0; h < num_heads; h++) {
                     compute.rmsnorm(q.data() + h * head_dim,
                                     q.data() + h * head_dim,
@@ -220,6 +223,9 @@ public:
                 }
             }
             if (lw.attn_k_norm) {
+                #ifdef LLM_USE_OPENMP
+                #pragma omp parallel for
+                #endif
                 for (int h = 0; h < num_kv_heads; h++) {
                     compute.rmsnorm(k.data() + h * head_dim,
                                     k.data() + h * head_dim,
