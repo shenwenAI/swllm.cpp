@@ -148,6 +148,7 @@ public:
     }
 
     // Check if a token ID is an EOS/stop token
+    // Uses linear search since the list is typically very small (1-3 tokens)
     bool is_eos_token(int token_id) const {
         for (int eos : eos_token_ids) {
             if (token_id == eos) return true;

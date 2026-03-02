@@ -118,6 +118,7 @@ static bool has_chatml_support(const Model& model) {
 }
 
 static std::string apply_chat_template(const Model& model, const std::string& prompt) {
+    // ChatML format: system message + user prompt + assistant turn
     if (has_chatml_support(model)) {
         return "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
                "<|im_start|>user\n" + prompt + "<|im_end|>\n"
@@ -139,7 +140,9 @@ static void generate(Model& model, Sampler& sampler, const std::string& prompt,
         }
     }
 
-    // Encode prompt (skip BOS when chat template provides its own start tokens)
+    // Encode prompt
+    // Skip BOS when chat template is applied: the template's own special tokens
+    // (e.g., <|im_start|>) serve as the proper start markers.
     std::vector<int> tokens = model.tokenizer.encode(final_prompt, !template_applied);
 
     fprintf(stderr, "Prompt tokens: %zu\n", tokens.size());
