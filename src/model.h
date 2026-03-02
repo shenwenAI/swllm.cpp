@@ -29,6 +29,7 @@ struct ModelConfig {
     float rope_theta = 10000.0f;
     int head_dim = 0;           // derived: hidden_size / num_heads
     int kv_dim = 0;             // derived: head_dim * num_kv_heads
+    bool qkv_bias = false;      // Qwen3-style QKV bias
 };
 
 // ---- Transformer weights ----
@@ -39,6 +40,9 @@ struct LayerWeights {
     float* wk = nullptr;            // [num_kv_heads * head_dim, hidden_size]
     float* wv = nullptr;            // [num_kv_heads * head_dim, hidden_size]
     float* wo = nullptr;            // [hidden_size, num_heads * head_dim]
+    float* bq = nullptr;            // [num_heads * head_dim] (optional, Qwen3)
+    float* bk = nullptr;            // [num_kv_heads * head_dim] (optional, Qwen3)
+    float* bv = nullptr;            // [num_kv_heads * head_dim] (optional, Qwen3)
     float* ffn_norm = nullptr;      // [hidden_size]
     float* w_gate = nullptr;        // [intermediate_size, hidden_size]
     float* w_up = nullptr;          // [intermediate_size, hidden_size]
@@ -144,6 +148,9 @@ public:
                 config.hidden_size, config.intermediate_size, config.vocab_size);
         fprintf(stderr, "  Context: %d, RoPE theta: %.0f\n",
                 config.max_seq_len, config.rope_theta);
+        if (config.qkv_bias) {
+            fprintf(stderr, "  QKV bias: enabled (Qwen3-style)\n");
+        }
         fprintf(stderr, "  Backend: %s\n", backend_name(compute.backend));
         return true;
     }
@@ -176,8 +183,14 @@ public:
             compute.matmul_transposed(v.data(), xb.data(), lw.wv,
                                       num_kv_heads * head_dim, dim);
 
-            // Apply RoPE
-            compute.rope(q.data(), k.data(), num_heads * head_dim, head_dim,
+            // Add QKV bias (Qwen3-style models)
+            if (lw.bq) compute.add(q.data(), q.data(), lw.bq, num_heads * head_dim);
+            if (lw.bk) compute.add(k.data(), k.data(), lw.bk, kv_dim);
+            if (lw.bv) compute.add(v.data(), v.data(), lw.bv, kv_dim);
+
+            // Apply RoPE (separate Q and K dims for GQA correctness)
+            compute.rope(q.data(), k.data(), num_heads * head_dim,
+                         num_kv_heads * head_dim, head_dim,
                          pos, config.rope_theta);
 
             // Store K, V in cache
@@ -266,6 +279,11 @@ public:
             n += static_cast<double>(config.num_kv_heads) * config.head_dim * config.hidden_size; // wk
             n += static_cast<double>(config.num_kv_heads) * config.head_dim * config.hidden_size; // wv
             n += static_cast<double>(config.hidden_size) * config.num_heads * config.head_dim; // wo
+            if (config.qkv_bias) {
+                n += config.num_heads * config.head_dim; // bq
+                n += config.kv_dim; // bk
+                n += config.kv_dim; // bv
+            }
             n += config.hidden_size; // ffn_norm
             n += static_cast<double>(config.intermediate_size) * config.hidden_size; // w_gate
             n += static_cast<double>(config.intermediate_size) * config.hidden_size; // w_up
@@ -307,6 +325,14 @@ private:
         }
 
         config.head_dim = config.hidden_size / config.num_heads;
+
+        // Override head_dim if explicitly specified (e.g. Qwen models)
+        int explicit_head_dim = static_cast<int>(
+            gguf.get_i64(arch + ".attention.key_length", 0));
+        if (explicit_head_dim > 0) {
+            config.head_dim = explicit_head_dim;
+        }
+
         config.kv_dim = config.head_dim * config.num_kv_heads;
 
         // Get vocab size from tokenizer if not in model metadata
@@ -386,6 +412,19 @@ private:
                 static_cast<int64_t>(kv_dim) * dim);
             weights.layers[l].wo = load_tensor(prefix + "attn_output.weight",
                 static_cast<int64_t>(dim) * n_heads * head_dim);
+
+            // Load QKV biases (optional, used by Qwen3-style models)
+            weights.layers[l].bq = load_tensor(prefix + "attn_q.bias",
+                static_cast<int64_t>(n_heads) * head_dim);
+            weights.layers[l].bk = load_tensor(prefix + "attn_k.bias",
+                static_cast<int64_t>(kv_dim));
+            weights.layers[l].bv = load_tensor(prefix + "attn_v.bias",
+                static_cast<int64_t>(kv_dim));
+
+            if (l == 0 && weights.layers[l].bq) {
+                config.qkv_bias = true;
+            }
+
             weights.layers[l].ffn_norm = load_tensor(prefix + "ffn_norm.weight", dim);
             weights.layers[l].w_gate = load_tensor(prefix + "ffn_gate.weight",
                 static_cast<int64_t>(ffn) * dim);

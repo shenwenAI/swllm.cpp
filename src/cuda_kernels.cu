@@ -175,7 +175,7 @@ void cuda_silu_elementwise_mul(float* out, const float* gate, const float* up, i
 
 // ---- RoPE kernel ----
 
-__global__ void rope_kernel(float* q, float* k, int dim, int head_dim, int pos, float theta) {
+__global__ void rope_kernel(float* data, int dim, int head_dim, int pos, float theta) {
     int i = 2 * (blockIdx.x * blockDim.x + threadIdx.x);
     if (i < dim) {
         int head_offset = i % head_dim;
@@ -184,30 +184,28 @@ __global__ void rope_kernel(float* q, float* k, int dim, int head_dim, int pos, 
         float cos_val = cosf(angle);
         float sin_val = sinf(angle);
 
-        float q0 = q[i], q1 = q[i + 1];
-        q[i]     = q0 * cos_val - q1 * sin_val;
-        q[i + 1] = q0 * sin_val + q1 * cos_val;
-
-        float k0 = k[i], k1 = k[i + 1];
-        k[i]     = k0 * cos_val - k1 * sin_val;
-        k[i + 1] = k0 * sin_val + k1 * cos_val;
+        float d0 = data[i], d1 = data[i + 1];
+        data[i]     = d0 * cos_val - d1 * sin_val;
+        data[i + 1] = d0 * sin_val + d1 * cos_val;
     }
 }
 
-void cuda_rope(float* q, float* k, int dim, int head_dim, int pos, float theta) {
+void cuda_rope(float* q, float* k, int q_dim, int k_dim, int head_dim, int pos, float theta) {
     float *d_q, *d_k;
-    CUDA_CHECK(cudaMalloc(&d_q, dim * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_k, dim * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_q, q_dim * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_k, k_dim * sizeof(float)));
 
-    CUDA_CHECK(cudaMemcpy(d_q, q, dim * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_k, k, dim * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_q, q, q_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_k, k, k_dim * sizeof(float), cudaMemcpyHostToDevice));
 
     int threads = 256;
-    int blocks = (dim / 2 + threads - 1) / threads;
-    rope_kernel<<<blocks, threads>>>(d_q, d_k, dim, head_dim, pos, theta);
+    int q_blocks = (q_dim / 2 + threads - 1) / threads;
+    int k_blocks = (k_dim / 2 + threads - 1) / threads;
+    rope_kernel<<<q_blocks, threads>>>(d_q, q_dim, head_dim, pos, theta);
+    rope_kernel<<<k_blocks, threads>>>(d_k, k_dim, head_dim, pos, theta);
 
-    CUDA_CHECK(cudaMemcpy(q, d_q, dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(k, d_k, dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(q, d_q, q_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(k, d_k, k_dim * sizeof(float), cudaMemcpyDeviceToHost));
     cudaFree(d_q);
     cudaFree(d_k);
 }

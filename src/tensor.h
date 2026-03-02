@@ -22,7 +22,7 @@ void cuda_matmul(float* out, const float* a, const float* b, int M, int N, int K
 void cuda_rmsnorm(float* out, const float* x, const float* w, int n, float eps);
 void cuda_softmax(float* x, int n);
 void cuda_silu_elementwise_mul(float* out, const float* gate, const float* up, int n);
-void cuda_rope(float* q, float* k, int dim, int head_dim, int pos, float theta);
+void cuda_rope(float* q, float* k, int q_dim, int k_dim, int head_dim, int pos, float theta);
 void cuda_add(float* out, const float* a, const float* b, int n);
 #endif
 
@@ -205,20 +205,29 @@ inline void cpu_silu_elementwise_mul(float* out, const float* gate, const float*
 }
 
 // Rotary positional embeddings (RoPE)
-inline void cpu_rope(float* q, float* k, int dim, int head_dim, int pos, float theta) {
-    for (int i = 0; i < dim; i += 2) {
+// q_dim and k_dim may differ when using GQA (grouped query attention)
+inline void cpu_rope(float* q, float* k, int q_dim, int k_dim, int head_dim, int pos, float theta) {
+    // Apply to query
+    for (int i = 0; i < q_dim; i += 2) {
         int head_offset = i % head_dim;
         float freq = 1.0f / powf(theta, static_cast<float>(head_offset) / head_dim);
         float angle = pos * freq;
         float cos_val = cosf(angle);
         float sin_val = sinf(angle);
 
-        // Apply to query
         float q0 = q[i], q1 = q[i + 1];
         q[i]     = q0 * cos_val - q1 * sin_val;
         q[i + 1] = q0 * sin_val + q1 * cos_val;
+    }
 
-        // Apply to key
+    // Apply to key
+    for (int i = 0; i < k_dim; i += 2) {
+        int head_offset = i % head_dim;
+        float freq = 1.0f / powf(theta, static_cast<float>(head_offset) / head_dim);
+        float angle = pos * freq;
+        float cos_val = cosf(angle);
+        float sin_val = sinf(angle);
+
         float k0 = k[i], k1 = k[i + 1];
         k[i]     = k0 * cos_val - k1 * sin_val;
         k[i + 1] = k0 * sin_val + k1 * cos_val;
@@ -288,14 +297,14 @@ struct Compute {
         cpu_silu_elementwise_mul(out, gate, up, n);
     }
 
-    void rope(float* q, float* k, int dim, int head_dim, int pos, float theta) {
+    void rope(float* q, float* k, int q_dim, int k_dim, int head_dim, int pos, float theta) {
 #ifdef LLM_USE_CUDA
         if (backend == Backend::CUDA) {
-            cuda_rope(q, k, dim, head_dim, pos, theta);
+            cuda_rope(q, k, q_dim, k_dim, head_dim, pos, theta);
             return;
         }
 #endif
-        cpu_rope(q, k, dim, head_dim, pos, theta);
+        cpu_rope(q, k, q_dim, k_dim, head_dim, pos, theta);
     }
 
     void add(float* out, const float* a, const float* b, int n) {

@@ -275,12 +275,67 @@ void test_cpu_rope() {
     float q_orig[] = {1, 2, 3, 4};
     float k_orig[] = {5, 6, 7, 8};
 
-    cpu_rope(q, k, 4, 4, 0, 10000.0f);
+    cpu_rope(q, k, 4, 4, 4, 0, 10000.0f);
 
     ASSERT_NEAR(q[0], q_orig[0], 1e-5f);
     ASSERT_NEAR(q[1], q_orig[1], 1e-5f);
     ASSERT_NEAR(k[0], k_orig[0], 1e-5f);
     ASSERT_NEAR(k[1], k_orig[1], 1e-5f);
+
+    PASS();
+}
+
+void test_cpu_rope_gqa() {
+    TEST(cpu_rope_gqa);
+
+    // Test RoPE with GQA: q has more dimensions than k
+    // q: 2 heads * 4 head_dim = 8, k: 1 kv_head * 4 head_dim = 4
+    float q[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    float k[] = {1, 2, 3, 4};
+    float q_orig[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    float k_orig[] = {1, 2, 3, 4};
+
+    // At position 0, RoPE should be identity
+    cpu_rope(q, k, 8, 4, 4, 0, 10000.0f);
+
+    for (int i = 0; i < 8; i++) {
+        ASSERT_NEAR(q[i], q_orig[i], 1e-5f);
+    }
+    for (int i = 0; i < 4; i++) {
+        ASSERT_NEAR(k[i], k_orig[i], 1e-5f);
+    }
+
+    // At position 1, values should change
+    float q2[] = {1, 0, 0, 0, 1, 0, 0, 0};
+    float k2[] = {1, 0, 0, 0};
+    cpu_rope(q2, k2, 8, 4, 4, 1, 10000.0f);
+
+    // q[0] = cos(freq0), q[1] = sin(freq0) for first pair
+    float freq0 = 1.0f / powf(10000.0f, 0.0f / 4.0f);
+    float angle0 = 1.0f * freq0;
+    ASSERT_NEAR(q2[0], cosf(angle0), 1e-5f);
+    ASSERT_NEAR(q2[1], sinf(angle0), 1e-5f);
+    // k should have the same rotation for its first pair
+    ASSERT_NEAR(k2[0], cosf(angle0), 1e-5f);
+    ASSERT_NEAR(k2[1], sinf(angle0), 1e-5f);
+
+    PASS();
+}
+
+void test_qkv_bias_add() {
+    TEST(qkv_bias_add);
+
+    // Simulate QKV projection + bias (as in Qwen3)
+    float q[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float bias[] = {0.1f, 0.2f, 0.3f, 0.4f};
+    float expected[] = {1.1f, 2.2f, 3.3f, 4.4f};
+
+    cpu_add(q, q, bias, 4);
+
+    ASSERT_NEAR(q[0], expected[0], 1e-5f);
+    ASSERT_NEAR(q[1], expected[1], 1e-5f);
+    ASSERT_NEAR(q[2], expected[2], 1e-5f);
+    ASSERT_NEAR(q[3], expected[3], 1e-5f);
 
     PASS();
 }
@@ -377,6 +432,8 @@ int main() {
     test_cpu_silu();
     test_cpu_add();
     test_cpu_rope();
+    test_cpu_rope_gqa();
+    test_qkv_bias_add();
 
     fprintf(stderr, "\nSampler tests:\n");
     test_sampler_greedy();
