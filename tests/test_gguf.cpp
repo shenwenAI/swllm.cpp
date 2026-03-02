@@ -546,6 +546,186 @@ void test_context_override() {
     PASS();
 }
 
+// ---- GPT-2 tokenizer tests ----
+
+void test_gpt2_byte_mapping() {
+    TEST(gpt2_byte_mapping);
+
+    Tokenizer tok;
+    tok.tokenizer_model = "gpt2";
+    tok.init_gpt2_byte_mapping();
+
+    // Verify mapping size: all 256 bytes should be mapped
+    ASSERT_EQ(static_cast<int>(tok.byte_to_unicode.size()), 256);
+    ASSERT_EQ(static_cast<int>(tok.unicode_to_byte.size()), 256);
+
+    // ASCII printable chars (33-126) map to themselves
+    ASSERT_EQ(tok.byte_to_unicode[static_cast<uint8_t>('A')], std::string("A"));
+    ASSERT_EQ(tok.byte_to_unicode[static_cast<uint8_t>('z')], std::string("z"));
+    ASSERT_EQ(tok.byte_to_unicode[static_cast<uint8_t>('!')], std::string("!"));
+
+    // Space (byte 32) maps to U+0120 (Ġ), UTF-8: C4 A0
+    std::string space_mapped = tok.byte_to_unicode[32];
+    ASSERT_EQ(space_mapped.size(), 2u);
+    ASSERT_EQ(static_cast<uint8_t>(space_mapped[0]), 0xC4u);
+    ASSERT_EQ(static_cast<uint8_t>(space_mapped[1]), 0xA0u);
+
+    // Newline (byte 10) maps to U+010A (Ċ), UTF-8: C4 8A
+    std::string nl_mapped = tok.byte_to_unicode[10];
+    ASSERT_EQ(nl_mapped.size(), 2u);
+    ASSERT_EQ(static_cast<uint8_t>(nl_mapped[0]), 0xC4u);
+    ASSERT_EQ(static_cast<uint8_t>(nl_mapped[1]), 0x8Au);
+
+    // Verify round-trip: byte -> unicode codepoint -> byte
+    for (int b = 0; b < 256; b++) {
+        uint8_t byte_val = static_cast<uint8_t>(b);
+        const std::string& utf8 = tok.byte_to_unicode[byte_val];
+        // Decode UTF-8 to get codepoint
+        char32_t cp;
+        if (static_cast<uint8_t>(utf8[0]) < 0x80) {
+            cp = static_cast<uint8_t>(utf8[0]);
+        } else {
+            cp = (static_cast<uint8_t>(utf8[0]) & 0x1F);
+            cp = (cp << 6) | (static_cast<uint8_t>(utf8[1]) & 0x3F);
+        }
+        auto it = tok.unicode_to_byte.find(cp);
+        ASSERT_TRUE(it != tok.unicode_to_byte.end());
+        ASSERT_EQ(it->second, byte_val);
+    }
+
+    PASS();
+}
+
+void test_gpt2_decode() {
+    TEST(gpt2_decode);
+
+    Tokenizer tok;
+    tok.tokenizer_model = "gpt2";
+    tok.init_gpt2_byte_mapping();
+
+    // Set up a minimal vocabulary with GPT-2 encoded tokens
+    tok.vocab_size = 3;
+    tok.id_to_token.resize(3);
+
+    // Token 0: "Hello" (all ASCII, maps to itself)
+    tok.id_to_token[0] = "Hello";
+    ASSERT_EQ(tok.decode(0), std::string("Hello"));
+
+    // Token 1: space + "the" = Ġ + "the", where Ġ is U+0120 (C4 A0 in UTF-8)
+    tok.id_to_token[1] = std::string("\xC4\xA0") + "the";
+    ASSERT_EQ(tok.decode(1), std::string(" the"));
+
+    // Token 2: newline = Ċ (U+010A = C4 8A in UTF-8)
+    tok.id_to_token[2] = std::string("\xC4\x8A");
+    ASSERT_EQ(tok.decode(2), std::string("\n"));
+
+    PASS();
+}
+
+void test_gpt2_decode_chinese() {
+    TEST(gpt2_decode_chinese);
+
+    Tokenizer tok;
+    tok.tokenizer_model = "gpt2";
+    tok.init_gpt2_byte_mapping();
+
+    // Chinese character 你 (U+4F60) = UTF-8 bytes E4 BD A0
+    // In GPT-2 mapping:
+    //   byte E4 (228) -> safe range -> codepoint 0xE4 (ä) -> UTF-8: C3 A4
+    //   byte BD (189) -> safe range -> codepoint 0xBD (½) -> UTF-8: C2 BD
+    //   byte A0 (160) -> NOT safe -> codepoint U+0142 (ł) -> UTF-8: C5 82
+    tok.vocab_size = 1;
+    tok.id_to_token.resize(1);
+    tok.id_to_token[0] = std::string("\xC3\xA4\xC2\xBD\xC5\x82"); // ä½ł
+    std::string decoded = tok.decode(0);
+    // Should decode to 你 (E4 BD A0)
+    ASSERT_EQ(decoded.size(), 3u);
+    ASSERT_EQ(static_cast<uint8_t>(decoded[0]), 0xE4u);
+    ASSERT_EQ(static_cast<uint8_t>(decoded[1]), 0xBDu);
+    ASSERT_EQ(static_cast<uint8_t>(decoded[2]), 0xA0u);
+
+    PASS();
+}
+
+void test_gpt2_encode() {
+    TEST(gpt2_encode);
+
+    Tokenizer tok;
+    tok.tokenizer_model = "gpt2";
+    tok.init_gpt2_byte_mapping();
+
+    // Build a minimal vocabulary and merge table for GPT-2
+    std::vector<std::string> vocab_tokens = {
+        "H", "e", "l", "o",                                    // 0-3: single chars
+        "He",                                                   // 4
+        "ll",                                                   // 5
+        "Hell",                                                 // 6
+        "Hello",                                                // 7
+        std::string("\xC4\xA0"),                                // 8: Ġ (space)
+    };
+
+    tok.vocab_size = static_cast<int>(vocab_tokens.size());
+    tok.id_to_token = vocab_tokens;
+    for (int i = 0; i < tok.vocab_size; i++) {
+        tok.token_to_id[tok.id_to_token[i]] = i;
+    }
+    tok.bos_token_id = -1; // no BOS for test
+
+    // Merge rules match the merged symbols at each BPE step:
+    // [H, e, l, l, o] → merge H+e → [He, l, l, o]
+    // → merge l+l → [He, ll, o] → merge He+ll → [Hell, o]
+    // → merge Hell+o → [Hello]
+    tok.merge_ranks["H e"] = 0;
+    tok.merge_ranks["l l"] = 1;
+    tok.merge_ranks["He ll"] = 2;
+    tok.merge_ranks["Hell o"] = 3;
+    tok.merges.push_back({"H", "e", 0});
+
+    // Encode "Hello" (no space, single word)
+    auto tokens = tok.encode("Hello", false);
+    // Should produce token 7 ("Hello") after merging
+    ASSERT_EQ(static_cast<int>(tokens.size()), 1);
+    ASSERT_EQ(tokens[0], 7); // "Hello"
+
+    PASS();
+}
+
+void test_gpt2_pretokenize() {
+    TEST(gpt2_pretokenize);
+
+    Tokenizer tok;
+    tok.tokenizer_model = "gpt2";
+    tok.init_gpt2_byte_mapping();
+
+    // Build vocabulary with space-prefixed tokens
+    std::string space_utf8 = std::string("\xC4\xA0"); // Ġ (GPT-2 mapped space)
+    std::vector<std::string> vocab_tokens = {
+        "a", "b",                                    // 0-1
+        space_utf8 + "a",                            // 2: " a"
+        space_utf8 + "b",                            // 3: " b"
+    };
+
+    tok.vocab_size = static_cast<int>(vocab_tokens.size());
+    tok.id_to_token = vocab_tokens;
+    for (int i = 0; i < tok.vocab_size; i++) {
+        tok.token_to_id[tok.id_to_token[i]] = i;
+    }
+    tok.bos_token_id = -1;
+
+    // Add merge rules for space + letter
+    tok.merge_ranks[space_utf8 + " a"] = 0;  // Ġ + a -> Ġa
+    tok.merge_ranks[space_utf8 + " b"] = 1;  // Ġ + b -> Ġb
+    tok.merges.push_back({space_utf8, "a", 0});
+
+    // Encode "a b" -> should produce tokens [0 ("a"), 3 (" b")]
+    auto tokens = tok.encode("a b", false);
+    ASSERT_EQ(static_cast<int>(tokens.size()), 2);
+    ASSERT_EQ(tokens[0], 0); // "a"
+    ASSERT_EQ(tokens[1], 3); // " b" (Ġb)
+
+    PASS();
+}
+
 // ---- Run all tests ----
 
 int main() {
@@ -582,6 +762,13 @@ int main() {
     fprintf(stderr, "\nQwen3 config tests:\n");
     test_qwen3_config();
     test_context_override();
+
+    fprintf(stderr, "\nGPT-2 tokenizer tests:\n");
+    test_gpt2_byte_mapping();
+    test_gpt2_decode();
+    test_gpt2_decode_chinese();
+    test_gpt2_encode();
+    test_gpt2_pretokenize();
 
     fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
             tests_passed, tests_failed);
