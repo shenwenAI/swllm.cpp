@@ -1,1 +1,0 @@
-/tmp/codeql-scratch-c9bd8e8375ddcdd0/dbs/cpp/working/autobuild/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/test_gguf.dir/link.d CMakeFiles/test_gguf.dir/tests/test_gguf.cpp.o -o test_gguf  -lm
