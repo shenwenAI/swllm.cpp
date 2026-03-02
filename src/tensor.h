@@ -19,6 +19,7 @@
 #ifdef LLM_USE_CUDA
 // Forward declarations for CUDA kernels (defined in cuda_kernels.cu)
 void cuda_matmul(float* out, const float* a, const float* b, int M, int N, int K);
+void cuda_matmul_transposed_weight(float* out, const float* x, const float* w, int N, int K);
 void cuda_rmsnorm(float* out, const float* x, const float* w, int n, float eps);
 void cuda_softmax(float* x, int n);
 void cuda_silu_elementwise_mul(float* out, const float* gate, const float* up, int n);
@@ -409,8 +410,7 @@ struct Compute {
     void matmul_transposed(float* out, const float* x, const float* w, int N, int K) {
 #ifdef LLM_USE_CUDA
         if (backend == Backend::CUDA) {
-            // For CUDA, use standard matmul with M=1
-            cuda_matmul(out, x, w, 1, N, K);
+            cuda_matmul_transposed_weight(out, x, w, N, K);
             return;
         }
 #endif
@@ -427,12 +427,13 @@ struct Compute {
 #ifdef LLM_USE_CUDA
         if (backend == Backend::CUDA) {
             if (w.type == GGML_TYPE_F32) {
-                cuda_matmul(out, x, static_cast<const float*>(w.data), 1, N, K);
+                cuda_matmul_transposed_weight(out, x,
+                    static_cast<const float*>(w.data), N, K);
             } else {
                 std::vector<float> tmp(static_cast<size_t>(N) * K);
                 dequantize(w.data, tmp.data(),
                            static_cast<int64_t>(N) * K, w.type);
-                cuda_matmul(out, x, tmp.data(), 1, N, K);
+                cuda_matmul_transposed_weight(out, x, tmp.data(), N, K);
             }
             return;
         }
