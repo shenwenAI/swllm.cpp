@@ -13,6 +13,10 @@
 #include <windows.h>
 #endif
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 #include "model.h"
 #include "sampler.h"
 
@@ -29,6 +33,60 @@ struct RunConfig {
     bool no_chat_template = false;  // disable auto chat template
     bool no_thinking = false;       // hide <think>...</think> blocks
 };
+
+// Print CPU model name and active SIMD level to stderr.
+static void print_cpu_info() {
+#if defined(_WIN32)
+    HKEY key;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                      "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                      0, KEY_READ, &key) == ERROR_SUCCESS) {
+        char name[256] = {0};
+        DWORD size = sizeof(name);
+        RegQueryValueExA(key, "ProcessorNameString", nullptr, nullptr,
+                         reinterpret_cast<LPBYTE>(name), &size);
+        RegCloseKey(key);
+        const char* p = name;
+        while (*p == ' ') p++;
+        fprintf(stderr, "CPU: %s\n", p);
+    }
+#elif defined(__APPLE__)
+    char brand[256] = {0};
+    size_t brand_len = sizeof(brand);
+    if (sysctlbyname("machdep.cpu.brand_string", brand, &brand_len,
+                     nullptr, 0) == 0) {
+        fprintf(stderr, "CPU: %s\n", brand);
+    }
+#else
+    FILE* f = fopen("/proc/cpuinfo", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "model name", 10) == 0) {
+                char* colon = strchr(line, ':');
+                if (colon) {
+                    char* p = colon + 1;
+                    while (*p == ' ' || *p == '\t') p++;
+                    size_t len = strlen(p);
+                    while (len > 0 &&
+                           (p[len - 1] == '\n' || p[len - 1] == '\r')) {
+                        p[--len] = '\0';
+                    }
+                    fprintf(stderr, "CPU: %s\n", p);
+                }
+                break;
+            }
+        }
+        fclose(f);
+    }
+#endif
+
+#if defined(LLM_USE_AVX2)
+    fprintf(stderr, "CPU SIMD: AVX2+FMA\n");
+#else
+    fprintf(stderr, "CPU SIMD: none\n");
+#endif
+}
 
 static void print_usage(const char* prog) {
     fprintf(stderr,
@@ -352,6 +410,9 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 1;
     }
+
+    // Show hardware info (CPU always, GPU when requested)
+    print_cpu_info();
 
     // Check GPU support
     Backend backend = Backend::CPU;

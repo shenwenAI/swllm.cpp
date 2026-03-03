@@ -8,6 +8,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Options
 option(LLM_CUDA "Enable CUDA GPU support" OFF)
 option(LLM_OPENMP "Enable OpenMP parallelization" ON)
+option(LLM_AVX2 "Enable AVX2+FMA SIMD acceleration" OFF)
+option(LLM_NATIVE "Enable native CPU optimizations (-march=native)" OFF)
 
 # Source files
 set(LLM_SOURCES src/main.cpp)
@@ -26,6 +28,23 @@ if(LLM_OPENMP)
         message(STATUS "OpenMP not found, disabling")
         set(LLM_OPENMP OFF)
     endif()
+endif()
+
+# SIMD
+if(LLM_NATIVE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        add_compile_options(-march=native)
+    endif()
+    add_compile_definitions(LLM_USE_AVX2)
+    message(STATUS "Native CPU optimizations enabled (-march=native)")
+elseif(LLM_AVX2)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        add_compile_options(-mavx2 -mfma)
+    elseif(MSVC)
+        add_compile_options(/arch:AVX2)
+    endif()
+    add_compile_definitions(LLM_USE_AVX2)
+    message(STATUS "AVX2+FMA SIMD acceleration enabled")
 endif()
 
 # CUDA
