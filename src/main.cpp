@@ -20,6 +20,7 @@
 
 #include "model.h"
 #include "sampler.h"
+#include "server.h"
 
 #ifdef LLM_USE_CUDA
 // Forward declaration – defined in cuda_kernels.cu
@@ -84,6 +85,7 @@ static void print_hardware_info() {
 struct RunConfig {
     std::string model_path;
     std::string prompt = "Hello";
+    std::string system_prompt = "You are a helpful assistant.";
     int max_tokens = 256;
     int context_len = 0;  // 0 = use model default
     bool use_gpu = false;
@@ -93,6 +95,8 @@ struct RunConfig {
     bool show_info = false;
     bool no_chat_template = false;  // disable auto chat template
     bool no_thinking = false;       // hide <think>...</think> blocks
+    bool server_mode = false;       // run as HTTP API server
+    int server_port = 8080;
 };
 
 static void print_usage(const char* prog) {
@@ -106,6 +110,7 @@ static void print_usage(const char* prog) {
         "\n"
         "Generation options:\n"
         "  -p, --prompt <text>      Input prompt (default: \"Hello\")\n"
+        "  -s, --system <text>      System prompt (default: \"You are a helpful assistant.\")\n"
         "  -n, --max-tokens <N>     Max tokens to generate (default: 256)\n"
         "  -c, --context <N>        Max context length (default: model's value)\n"
         "  -t, --temperature <F>    Sampling temperature (default: 0.8)\n"
@@ -119,6 +124,10 @@ static void print_usage(const char* prog) {
         "  --cpu                    Use CPU backend (default)\n"
         "  --threads <N>            Number of CPU threads (default: auto)\n"
         "\n"
+        "Server options:\n"
+        "  --server                 Run as OpenAI-compatible HTTP API server\n"
+        "  --port <N>               HTTP server port (default: 8080)\n"
+        "\n"
         "Other:\n"
         "  -i, --interactive        Interactive chat mode\n"
         "  --no-chat-template       Disable automatic chat template\n"
@@ -129,8 +138,9 @@ static void print_usage(const char* prog) {
         "Examples:\n"
         "  %s -m model.gguf -p \"Once upon a time\"\n"
         "  %s -m model.gguf --gpu -n 512 -p \"Explain quantum computing\"\n"
-        "  %s -m model.gguf -i\n",
-        prog, prog, prog, prog);
+        "  %s -m model.gguf -i\n"
+        "  %s -m model.gguf --server --port 8080\n",
+        prog, prog, prog, prog, prog);
 }
 
 static bool parse_args(int argc, char** argv, RunConfig& cfg) {
@@ -140,6 +150,8 @@ static bool parse_args(int argc, char** argv, RunConfig& cfg) {
             cfg.model_path = argv[++i];
         } else if ((arg == "-p" || arg == "--prompt") && i + 1 < argc) {
             cfg.prompt = argv[++i];
+        } else if ((arg == "-s" || arg == "--system") && i + 1 < argc) {
+            cfg.system_prompt = argv[++i];
         } else if ((arg == "-n" || arg == "--max-tokens") && i + 1 < argc) {
             cfg.max_tokens = atoi(argv[++i]);
         } else if ((arg == "-c" || arg == "--context") && i + 1 < argc) {
@@ -168,6 +180,10 @@ static bool parse_args(int argc, char** argv, RunConfig& cfg) {
             cfg.no_thinking = true;
         } else if (arg == "--info") {
             cfg.show_info = true;
+        } else if (arg == "--server") {
+            cfg.server_mode = true;
+        } else if (arg == "--port" && i + 1 < argc) {
+            cfg.server_port = atoi(argv[++i]);
         } else if (arg == "-h" || arg == "--help") {
             return false;
         } else {
@@ -190,10 +206,11 @@ static bool has_chatml_support(const Model& model) {
            model.tokenizer.token_to_id.count("<|im_end|>");
 }
 
-static std::string apply_chat_template(const Model& model, const std::string& prompt) {
+static std::string apply_chat_template(const Model& model, const std::string& prompt,
+                                       const std::string& system_prompt) {
     // ChatML format: system message + user prompt + assistant turn
     if (has_chatml_support(model)) {
-        return "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        return "<|im_start|>system\n" + system_prompt + "<|im_end|>\n"
                "<|im_start|>user\n" + prompt + "<|im_end|>\n"
                "<|im_start|>assistant\n";
     }
@@ -201,13 +218,14 @@ static std::string apply_chat_template(const Model& model, const std::string& pr
 }
 
 static void generate(Model& model, Sampler& sampler, const std::string& prompt,
-                     int max_tokens, bool use_chat_template = false,
+                     int max_tokens, const std::string& system_prompt = "",
+                     bool use_chat_template = false,
                      bool no_thinking = false) {
     // Optionally apply chat template
     std::string final_prompt = prompt;
     bool template_applied = false;
     if (use_chat_template) {
-        final_prompt = apply_chat_template(model, prompt);
+        final_prompt = apply_chat_template(model, prompt, system_prompt);
         template_applied = (final_prompt != prompt);
         if (template_applied) {
             fprintf(stderr, "Chat template applied (ChatML format)\n");
@@ -342,6 +360,7 @@ static void generate(Model& model, Sampler& sampler, const std::string& prompt,
 }
 
 static void interactive_mode(Model& model, Sampler& sampler, int max_tokens,
+                            const std::string& system_prompt = "",
                             bool use_chat_template = false,
                             bool no_thinking = false) {
     fprintf(stderr, "Interactive mode. Type your prompt and press Enter.\n");
@@ -366,7 +385,8 @@ static void interactive_mode(Model& model, Sampler& sampler, int max_tokens,
         // Reset KV cache for new conversation
         model.kv_cache.clear();
 
-        generate(model, sampler, line, max_tokens, use_chat_template, no_thinking);
+        generate(model, sampler, line, max_tokens, system_prompt,
+                 use_chat_template, no_thinking);
         printf("\n");
     }
 }
@@ -465,12 +485,20 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Chat template: auto-detected (ChatML)\n");
     }
 
+    if (cfg.server_mode) {
+        ServerConfig srv;
+        srv.port          = cfg.server_port;
+        srv.system_prompt = cfg.system_prompt;
+        run_server(model, sampler, srv);
+        return 0;
+    }
+
     if (cfg.interactive) {
-        interactive_mode(model, sampler, cfg.max_tokens, use_chat_template,
-                        cfg.no_thinking);
+        interactive_mode(model, sampler, cfg.max_tokens, cfg.system_prompt,
+                        use_chat_template, cfg.no_thinking);
     } else {
-        generate(model, sampler, cfg.prompt, cfg.max_tokens, use_chat_template,
-                cfg.no_thinking);
+        generate(model, sampler, cfg.prompt, cfg.max_tokens, cfg.system_prompt,
+                use_chat_template, cfg.no_thinking);
     }
 
     return 0;

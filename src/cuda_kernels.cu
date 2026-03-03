@@ -18,7 +18,7 @@
 
 // ---- GPU availability check ----
 
-// Print information about the default CUDA device to stderr.
+// Print information about all available CUDA devices to stderr.
 // Returns true if at least one CUDA-capable device is present.
 bool cuda_print_gpu_info() {
     int device_count = 0;
@@ -28,17 +28,17 @@ bool cuda_print_gpu_info() {
         return false;
     }
 
-    int device_id = 0;
-    cudaDeviceProp prop;
-    if (cudaGetDevice(&device_id) != cudaSuccess ||
-        cudaGetDeviceProperties(&prop, device_id) != cudaSuccess) {
-        fprintf(stderr, "GPU:  (failed to query device properties)\n");
-        return false;
+    for (int id = 0; id < device_count; id++) {
+        cudaDeviceProp prop;
+        if (cudaGetDeviceProperties(&prop, id) != cudaSuccess) {
+            fprintf(stderr, "GPU %d: (failed to query device properties)\n", id);
+            continue;
+        }
+        fprintf(stderr, "GPU %d: %s (compute %d.%d, %.0f MB, %d SMs)\n",
+                id, prop.name, prop.major, prop.minor,
+                prop.totalGlobalMem / (1024.0 * 1024.0),
+                prop.multiProcessorCount);
     }
-    fprintf(stderr, "GPU:  %s (compute %d.%d, %.0f MB, %d SMs)\n",
-            prop.name, prop.major, prop.minor,
-            prop.totalGlobalMem / (1024.0 * 1024.0),
-            prop.multiProcessorCount);
     fprintf(stderr, "CUDA: %d.%d\n",
             CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
     return true;

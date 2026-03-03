@@ -167,6 +167,229 @@ inline void dequantize_f16(const void* src, float* dst, int64_t n) {
     }
 }
 
+// ---- K-quant helper ----
+
+// Extract a 6-bit scale and 6-bit min from the packed 12-byte scales field.
+// Used by Q4_K and Q5_K: 8 (d,m) pairs packed as:
+//   bytes 0-3:  lower 6 bits of d[0..3]  (bits 6-7 = upper bits of d[4..7])
+//   bytes 4-7:  lower 6 bits of m[0..3]  (bits 6-7 = upper bits of m[4..7])
+//   bytes 8-11: lower 4 bits of d[4..7] in bits 0-3, lower 4 bits of m[4..7] in bits 4-7
+static inline void get_scale_min_k4(int j, const uint8_t* scales,
+                                    uint8_t& sc, uint8_t& m) {
+    if (j < 4) {
+        sc = scales[j]   & 63;
+        m  = scales[j+4] & 63;
+    } else {
+        sc = (scales[j+4] & 0x0F) | ((scales[j-4] >> 6) << 4);
+        m  = (scales[j+4] >> 4)   | ((scales[j]   >> 6) << 4);
+    }
+}
+
+// ---- K-quant dequantization (block size = 256 elements) ----
+
+// Q2_K: 2-bit quants, block = scales(16)+qs(64)+d_f16(2)+dmin_f16(2) = 84 bytes
+inline void dequantize_q2_k(const void* src, float* dst, int64_t n) {
+    const size_t block_bytes = 84;
+    const int    QK = 256;
+    int64_t nb = n / QK;
+    const uint8_t* data = static_cast<const uint8_t*>(src);
+
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t* blk   = data + b * block_bytes;
+        const uint8_t* sc    = blk;       // scales: 16 bytes at offset 0
+        const uint8_t* qs    = blk + 16;  // quants: 64 bytes at offset 16
+        uint16_t d_h, dmin_h;
+        memcpy(&d_h,    blk + 80, 2);
+        memcpy(&dmin_h, blk + 82, 2);
+        float d    = fp16_to_fp32(d_h);
+        float dmin = fp16_to_fp32(dmin_h);
+
+        float* y = dst + static_cast<size_t>(b) * QK;
+        const uint8_t* q = qs;
+        int is = 0;
+        for (int n_ = 0; n_ < QK; n_ += 128) {
+            int shift = 0;
+            for (int j = 0; j < 4; j++) {
+                uint8_t sc0 = sc[is++];
+                float dl = d * (sc0 & 0xF), ml = dmin * (sc0 >> 4);
+                for (int l = 0; l < 16; l++) *y++ = dl * ((q[l]    >> shift) & 3) - ml;
+                uint8_t sc1 = sc[is++];
+                dl = d * (sc1 & 0xF); ml = dmin * (sc1 >> 4);
+                for (int l = 0; l < 16; l++) *y++ = dl * ((q[l+16] >> shift) & 3) - ml;
+                shift += 2;
+                if (shift == 8) { shift = 0; q += 32; }
+            }
+        }
+    }
+}
+
+// Q3_K: 3-bit quants, block = hmask(32)+qs(64)+scales(12)+d_f16(2) = 110 bytes
+// Scales are 16 × 6-bit values packed into 12 bytes with a specific bit layout.
+inline void dequantize_q3_k(const void* src, float* dst, int64_t n) {
+    const size_t block_bytes = 110;
+    const int    QK = 256;
+    int64_t nb = n / QK;
+    const uint8_t* data = static_cast<const uint8_t*>(src);
+
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t* blk  = data + b * block_bytes;
+        const uint8_t* hm   = blk;        // hmask:  32 bytes at offset 0
+        const uint8_t* qs   = blk + 32;   // quants: 64 bytes at offset 32
+        const uint8_t* sc   = blk + 96;   // scales: 12 bytes at offset 96
+        uint16_t d_h;
+        memcpy(&d_h, blk + 108, 2);
+        float d = fp16_to_fp32(d_h);
+
+        // Unpack 16 × 6-bit signed scales from 12 bytes.
+        // Packing (from ggml-quants reference):
+        //   sc[0..3]  → bits 0-1 of scales[0,4,8,12]  and  bits 2-3 of scales[0,4,8,12]
+        // Use the standard ggml extraction pattern:
+        const uint32_t kmask1 = 0x03030303u;
+        uint32_t tmp[3];
+        memcpy(tmp, sc, 12);
+        int8_t scales_i8[16];
+        {
+            uint32_t a0 = ((tmp[0]     ) & kmask1) | (((tmp[2]     ) & kmask1) << 4);
+            uint32_t a1 = (((tmp[0]>>2)) & kmask1) | (((tmp[2]>>2) ) & kmask1) << 4;
+            uint32_t a2 = ((tmp[1]     ) & kmask1) | (((tmp[2]>>4) ) & kmask1) << 4;
+            uint32_t a3 = (((tmp[1]>>2)) & kmask1) | (((tmp[2]>>6) ) & kmask1) << 4;
+            // subtract 32 from each byte
+            uint32_t sub = 0x20202020u;
+            a0 -= sub; a1 -= sub; a2 -= sub; a3 -= sub;
+            memcpy(scales_i8 +  0, &a0, 4);
+            memcpy(scales_i8 +  4, &a1, 4);
+            memcpy(scales_i8 +  8, &a2, 4);
+            memcpy(scales_i8 + 12, &a3, 4);
+        }
+
+        float* y = dst + static_cast<size_t>(b) * QK;
+        const uint8_t* q = qs;
+        uint8_t m = 1;
+        for (int n_ = 0; n_ < QK; n_ += 128) {
+            int sc_off = (n_ == 0) ? 0 : 8;
+            int shift = 0;
+            for (int j = 0; j < 4; j++) {
+                float dl0 = d * scales_i8[sc_off + j*2 + 0];
+                float dl1 = d * scales_i8[sc_off + j*2 + 1];
+                int base = n_ + j * 32;
+                for (int l = 0; l < 16; l++)
+                    y[base + l]      = dl0 * (static_cast<int>((q[l]    >> shift) & 3) - (hm[l]    & m ? 0 : 4));
+                for (int l = 0; l < 16; l++)
+                    y[base + 16 + l] = dl1 * (static_cast<int>((q[l+16] >> shift) & 3) - (hm[l+16] & m ? 0 : 4));
+                shift += 2;
+                if (shift == 8) { shift = 0; q += 32; }
+                m <<= 1;
+            }
+        }
+    }
+}
+
+// Q4_K: 4-bit quants, block = d_f16(2)+dmin_f16(2)+scales(12)+qs(128) = 144 bytes
+inline void dequantize_q4_k(const void* src, float* dst, int64_t n) {
+    const size_t block_bytes = 144;
+    const int    QK = 256;
+    int64_t nb = n / QK;
+    const uint8_t* data = static_cast<const uint8_t*>(src);
+
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t* blk = data + b * block_bytes;
+        uint16_t d_h, dmin_h;
+        memcpy(&d_h,    blk,     2);
+        memcpy(&dmin_h, blk + 2, 2);
+        float d    = fp16_to_fp32(d_h);
+        float dmin = fp16_to_fp32(dmin_h);
+        const uint8_t* scales = blk + 4;   // 12 bytes
+        const uint8_t* qs     = blk + 16;  // 128 bytes
+
+        float* y = dst + static_cast<size_t>(b) * QK;
+        int is = 0;
+        for (int j = 0; j < QK; j += 64) {
+            uint8_t sc, m;
+            get_scale_min_k4(is++, scales, sc, m);
+            float d1 = d * sc, m1 = dmin * m;
+            get_scale_min_k4(is++, scales, sc, m);
+            float d2 = d * sc, m2 = dmin * m;
+            const uint8_t* q = qs + (j >> 1);  // 32 bytes per 64-element group
+            for (int l = 0; l < 32; l++) y[j + l]      = d1 * (q[l] & 0xF) - m1;
+            for (int l = 0; l < 32; l++) y[j + l + 32] = d2 * (q[l] >>  4) - m2;
+        }
+    }
+}
+
+// Q5_K: 5-bit quants, block = d_f16(2)+dmin_f16(2)+scales(12)+qh(32)+qs(128) = 176 bytes
+inline void dequantize_q5_k(const void* src, float* dst, int64_t n) {
+    const size_t block_bytes = 176;
+    const int    QK = 256;
+    int64_t nb = n / QK;
+    const uint8_t* data = static_cast<const uint8_t*>(src);
+
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t* blk = data + b * block_bytes;
+        uint16_t d_h, dmin_h;
+        memcpy(&d_h,    blk,     2);
+        memcpy(&dmin_h, blk + 2, 2);
+        float d    = fp16_to_fp32(d_h);
+        float dmin = fp16_to_fp32(dmin_h);
+        const uint8_t* scales = blk + 4;   // 12 bytes
+        const uint8_t* qh     = blk + 16;  // 32 bytes (1 high bit per element)
+        const uint8_t* ql     = blk + 48;  // 128 bytes (4 low bits per element)
+
+        float* y = dst + static_cast<size_t>(b) * QK;
+        int is = 0;
+        uint8_t u1 = 1, u2 = 2;
+        for (int j = 0; j < QK; j += 64) {
+            uint8_t sc, m;
+            get_scale_min_k4(is++, scales, sc, m);
+            float d1 = d * sc, m1 = dmin * m;
+            get_scale_min_k4(is++, scales, sc, m);
+            float d2 = d * sc, m2 = dmin * m;
+            const uint8_t* q = ql + (j >> 1);
+            for (int l = 0; l < 32; l++) {
+                y[j + l]      = d1 * ((q[l] & 0xF) + (qh[l] & u1 ? 16 : 0)) - m1;
+                y[j + l + 32] = d2 * ((q[l] >>  4) + (qh[l] & u2 ? 16 : 0)) - m2;
+            }
+            u1 <<= 2; u2 <<= 2;
+        }
+    }
+}
+
+// Q6_K: 6-bit quants, block = ql(128)+qh(64)+scales_i8(16)+d_f16(2) = 210 bytes
+inline void dequantize_q6_k(const void* src, float* dst, int64_t n) {
+    const size_t block_bytes = 210;
+    const int    QK = 256;
+    int64_t nb = n / QK;
+    const uint8_t* data = static_cast<const uint8_t*>(src);
+
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t* blk = data + b * block_bytes;
+        const uint8_t* ql  = blk;        // 128 bytes: lower 4 bits
+        const uint8_t* qh  = blk + 128;  //  64 bytes: upper 2 bits
+        const int8_t*  sc  = reinterpret_cast<const int8_t*>(blk + 192); // 16 bytes
+        uint16_t d_h;
+        memcpy(&d_h, blk + 208, 2);
+        float d = fp16_to_fp32(d_h);
+
+        float* y = dst + static_cast<size_t>(b) * QK;
+        for (int n_ = 0; n_ < QK; n_ += 128) {
+            const uint8_t* ql_ = ql + (n_ >> 1);
+            const uint8_t* qh_ = qh + (n_ >> 2);
+            const int8_t*  sc_ = sc + (n_ >> 4);
+            float*          y_ = y  + n_;
+            for (int l = 0; l < 32; l++) {
+                int is = l >> 4;
+                int8_t q1 = static_cast<int8_t>((ql_[l]      & 0xF) | (((qh_[l] >> 0) & 3) << 4)) - 32;
+                int8_t q2 = static_cast<int8_t>((ql_[l + 32] & 0xF) | (((qh_[l] >> 2) & 3) << 4)) - 32;
+                int8_t q3 = static_cast<int8_t>((ql_[l]      >>  4) | (((qh_[l] >> 4) & 3) << 4)) - 32;
+                int8_t q4 = static_cast<int8_t>((ql_[l + 32] >>  4) | (((qh_[l] >> 6) & 3) << 4)) - 32;
+                y_[l +  0] = d * sc_[is + 0] * q1;
+                y_[l + 32] = d * sc_[is + 2] * q2;
+                y_[l + 64] = d * sc_[is + 4] * q3;
+                y_[l + 96] = d * sc_[is + 6] * q4;
+            }
+        }
+    }
+}
+
 // Convert FP8 E4M3FN array to F32
 inline void dequantize_f8_e4m3(const void* src, float* dst, int64_t n) {
     const uint8_t* data = static_cast<const uint8_t*>(src);
@@ -197,6 +420,21 @@ inline void dequantize(const void* src, float* dst, int64_t n, GGMLType type) {
             break;
         case GGML_TYPE_Q8_0:
             dequantize_q8_0(src, dst, n);
+            break;
+        case GGML_TYPE_Q2_K:
+            dequantize_q2_k(src, dst, n);
+            break;
+        case GGML_TYPE_Q3_K:
+            dequantize_q3_k(src, dst, n);
+            break;
+        case GGML_TYPE_Q4_K:
+            dequantize_q4_k(src, dst, n);
+            break;
+        case GGML_TYPE_Q5_K:
+            dequantize_q5_k(src, dst, n);
+            break;
+        case GGML_TYPE_Q6_K:
+            dequantize_q6_k(src, dst, n);
             break;
         case GGML_TYPE_F8_E4M3:
             dequantize_f8_e4m3(src, dst, n);

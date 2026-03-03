@@ -60,12 +60,18 @@ inline size_t ggml_type_size(GGMLType type) {
     switch (type) {
         case GGML_TYPE_F32:  return 4;
         case GGML_TYPE_F16:  return 2;
-        case GGML_TYPE_Q4_0: return 2 + 16;   // block of 32: 1 f16 scale + 16 bytes of nibbles
+        case GGML_TYPE_Q4_0: return 2 + 16;    // block of 32: 1 f16 scale + 16 bytes of nibbles
         case GGML_TYPE_Q4_1: return 2 + 2 + 16;
         case GGML_TYPE_Q5_0: return 2 + 4 + 16;
         case GGML_TYPE_Q5_1: return 2 + 2 + 4 + 16;
-        case GGML_TYPE_Q8_0: return 2 + 32;   // block of 32: 1 f16 scale + 32 bytes
+        case GGML_TYPE_Q8_0: return 2 + 32;    // block of 32: 1 f16 scale + 32 bytes
         case GGML_TYPE_Q8_1: return 4 + 4 + 32;
+        // K-quants: block of 256 elements
+        case GGML_TYPE_Q2_K: return 84;  // scales(16)+qs(64)+d(2)+dmin(2)
+        case GGML_TYPE_Q3_K: return 110; // hmask(32)+qs(64)+scales(12)+d(2)
+        case GGML_TYPE_Q4_K: return 144; // d(2)+dmin(2)+scales(12)+qs(128)
+        case GGML_TYPE_Q5_K: return 176; // d(2)+dmin(2)+scales(12)+qh(32)+qs(128)
+        case GGML_TYPE_Q6_K: return 210; // ql(128)+qh(64)+scales(16)+d(2)
         case GGML_TYPE_I8:       return 1;
         case GGML_TYPE_I16:      return 2;
         case GGML_TYPE_I32:      return 4;
@@ -97,6 +103,12 @@ inline size_t ggml_block_size(GGMLType type) {
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q8_1:
             return 32;
+        case GGML_TYPE_Q2_K:
+        case GGML_TYPE_Q3_K:
+        case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q5_K:
+        case GGML_TYPE_Q6_K:
+            return 256;
         default:
             return 1;
     }
@@ -112,6 +124,11 @@ inline const char* ggml_type_name(GGMLType type) {
         case GGML_TYPE_Q5_1: return "Q5_1";
         case GGML_TYPE_Q8_0: return "Q8_0";
         case GGML_TYPE_Q8_1: return "Q8_1";
+        case GGML_TYPE_Q2_K: return "Q2_K";
+        case GGML_TYPE_Q3_K: return "Q3_K";
+        case GGML_TYPE_Q4_K: return "Q4_K";
+        case GGML_TYPE_Q5_K: return "Q5_K";
+        case GGML_TYPE_Q6_K: return "Q6_K";
         case GGML_TYPE_I8:   return "I8";
         case GGML_TYPE_I16:  return "I16";
         case GGML_TYPE_I32:  return "I32";

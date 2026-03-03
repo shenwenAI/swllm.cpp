@@ -1328,6 +1328,132 @@ void test_cpu_matmul_transposed_f8_e5m2() {
     PASS();
 }
 
+// ---- K-quant type size tests ----
+
+void test_kquant_type_sizes() {
+    TEST(kquant_type_sizes);
+    // Verify block sizes match the standard ggml K-quant definitions
+    ASSERT_EQ(ggml_block_size(GGML_TYPE_Q2_K), 256u);
+    ASSERT_EQ(ggml_block_size(GGML_TYPE_Q3_K), 256u);
+    ASSERT_EQ(ggml_block_size(GGML_TYPE_Q4_K), 256u);
+    ASSERT_EQ(ggml_block_size(GGML_TYPE_Q5_K), 256u);
+    ASSERT_EQ(ggml_block_size(GGML_TYPE_Q6_K), 256u);
+    // Verify byte sizes of each block type
+    ASSERT_EQ(ggml_type_size(GGML_TYPE_Q2_K), 84u);   // scales(16)+qs(64)+d(2)+dmin(2)
+    ASSERT_EQ(ggml_type_size(GGML_TYPE_Q3_K), 110u);  // hmask(32)+qs(64)+scales(12)+d(2)
+    ASSERT_EQ(ggml_type_size(GGML_TYPE_Q4_K), 144u);  // d(2)+dmin(2)+scales(12)+qs(128)
+    ASSERT_EQ(ggml_type_size(GGML_TYPE_Q5_K), 176u);  // d(2)+dmin(2)+scales(12)+qh(32)+qs(128)
+    ASSERT_EQ(ggml_type_size(GGML_TYPE_Q6_K), 210u);  // ql(128)+qh(64)+scales(16)+d(2)
+    // Verify type names
+    ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_Q2_K), "Q2_K"), 0);
+    ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_Q3_K), "Q3_K"), 0);
+    ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_Q4_K), "Q4_K"), 0);
+    ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_Q5_K), "Q5_K"), 0);
+    ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_Q6_K), "Q6_K"), 0);
+    PASS();
+}
+
+// Build a Q6_K block (210 bytes) with:
+//   d=1.0, all scales=1, ql=all zeros, qh=all zeros
+// → all 6-bit values = 0 - 32 = -32  → output = 1.0 * 1 * (-32) = -32.0
+void test_dequantize_q6_k() {
+    TEST(dequantize_q6_k);
+
+    std::vector<uint8_t> blk(210, 0);
+    // ql at [0..127]: already zero
+    // qh at [128..191]: already zero
+    // scales (int8) at [192..207]: set to 1
+    for (int i = 0; i < 16; i++) blk[192 + i] = 1;
+    // d at [208..209]: 1.0 in f16 = 0x3C00
+    uint16_t d16 = 0x3C00;
+    memcpy(blk.data() + 208, &d16, 2);
+
+    std::vector<float> out(256, 0.0f);
+    dequantize_q6_k(blk.data(), out.data(), 256);
+
+    // All values: 1.0 * 1 * (0 - 32) = -32.0
+    for (int i = 0; i < 256; i++) {
+        ASSERT_NEAR(out[i], -32.0f, 1e-4f);
+    }
+
+    // Cross-check via generic dequantize dispatch
+    std::vector<float> out2(256, 0.0f);
+    dequantize(blk.data(), out2.data(), 256, GGML_TYPE_Q6_K);
+    for (int i = 0; i < 256; i++) {
+        ASSERT_NEAR(out2[i], out[i], 1e-6f);
+    }
+
+    PASS();
+}
+
+// Build a Q4_K block (144 bytes) with:
+//   d=1.0, dmin=0.0, scales[0..3]=1 (→ sc=1,m=0 for groups 0-3)
+//   qs=all nibbles 0x8 → value = (0x8 & 0xF) = 8, output = 1.0*8 - 0 = 8.0
+//   (for groups 0-3 only; groups 4-7 have a different scale from packing)
+void test_dequantize_q4_k() {
+    TEST(dequantize_q4_k);
+
+    std::vector<uint8_t> blk(144, 0);
+    // d at [0..1]: 1.0 in f16 = 0x3C00
+    uint16_t d16 = 0x3C00, dmin16 = 0x0000; // dmin = 0.0
+    memcpy(blk.data() + 0, &d16,    2);
+    memcpy(blk.data() + 2, &dmin16, 2);
+    // scales at [4..15]: set scales[0..3]=1 → groups 0-3 get sc=1,m=0
+    blk[4] = 1; blk[5] = 1; blk[6] = 1; blk[7] = 1;
+    // qs at [16..143]: all 0x88 → nibbles = 8 each
+    for (int i = 16; i < 144; i++) blk[i] = 0x88;
+
+    std::vector<float> out(256, 0.0f);
+    dequantize_q4_k(blk.data(), out.data(), 256);
+
+    // Groups 0-3 (first 128 elements): sc=1, d=1.0, nibble=8, dmin=0 → 1.0*8-0=8.0
+    for (int i = 0; i < 128; i++) {
+        ASSERT_NEAR(out[i], 8.0f, 1e-4f);
+    }
+
+    // Cross-check via generic dequantize dispatch
+    std::vector<float> out2(256, 0.0f);
+    dequantize(blk.data(), out2.data(), 256, GGML_TYPE_Q4_K);
+    for (int i = 0; i < 256; i++) {
+        ASSERT_NEAR(out2[i], out[i], 1e-6f);
+    }
+
+    PASS();
+}
+
+// Build a Q2_K block (84 bytes) with:
+//   d=1.0, dmin=0.0, scales=all nibble 1 (sc=1,m=0), qs=all zeros (2-bit value 0)
+//   → output = 1.0 * 1 * 0 - 0 = 0.0 for every element
+void test_dequantize_q2_k() {
+    TEST(dequantize_q2_k);
+
+    std::vector<uint8_t> blk(84, 0);
+    // scales at [0..15]: sc in lower nibble = 1, m in upper nibble = 0
+    for (int i = 0; i < 16; i++) blk[i] = 0x01; // sc=1, m=0
+    // qs at [16..79]: all zeros (2-bit values all 0)
+    // d at [80..81]: 1.0 in f16
+    uint16_t d16 = 0x3C00, dmin16 = 0x0000;
+    memcpy(blk.data() + 80, &d16,    2);
+    memcpy(blk.data() + 82, &dmin16, 2);
+
+    std::vector<float> out(256, 1.0f); // initialise to non-zero
+    dequantize_q2_k(blk.data(), out.data(), 256);
+
+    // All 2-bit quants are 0 → output = d*(sc*0) - dmin*m = 0
+    for (int i = 0; i < 256; i++) {
+        ASSERT_NEAR(out[i], 0.0f, 1e-5f);
+    }
+
+    // Cross-check via dispatch
+    std::vector<float> out2(256, 1.0f);
+    dequantize(blk.data(), out2.data(), 256, GGML_TYPE_Q2_K);
+    for (int i = 0; i < 256; i++) {
+        ASSERT_NEAR(out2[i], out[i], 1e-6f);
+    }
+
+    PASS();
+}
+
 // ---- Run all tests ----
 
 int main() {
@@ -1390,6 +1516,12 @@ int main() {
 
     fprintf(stderr, "\nF16 direct computation tests:\n");
     test_cpu_matmul_transposed_f16();
+
+    fprintf(stderr, "\nK-quant type and dequantization tests:\n");
+    test_kquant_type_sizes();
+    test_dequantize_q6_k();
+    test_dequantize_q4_k();
+    test_dequantize_q2_k();
 
     fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
             tests_passed, tests_failed);
