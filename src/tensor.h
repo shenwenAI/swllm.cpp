@@ -354,6 +354,27 @@ inline void cpu_matmul_transposed_q4_0(float* out, const float* x,
     }
 }
 
+// Fused F16 dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is stored as 2 bytes per element in F16 format (no block structure).
+// Direct computation: each F16 value is converted to F32 inline during the dot
+// product, keeping weight traffic at 2 bytes/element instead of 4 bytes/element
+// and avoiding materialization of a full F32 weight buffer.
+inline void cpu_matmul_transposed_f16(float* out, const float* x,
+                                      const void* w, int N, int K) {
+    const uint16_t* wptr = static_cast<const uint16_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint16_t* row = wptr + static_cast<size_t>(i) * K;
+        for (int k = 0; k < K; k++) {
+            sum += x[k] * fp16_to_fp32(row[k]);
+        }
+        out[i] = sum;
+    }
+}
+
 // Fused FP8 E4M3FN dequantize + transposed matmul: out[N] = x[K] · W[N×K]
 // W is stored as 1 byte per element in FP8 E4M3FN format (no block structure).
 // Direct computation: each FP8 value is converted to F32 inline during the dot
@@ -600,6 +621,9 @@ struct Compute {
             case GGML_TYPE_F32:
                 cpu_matmul_transposed(out, x,
                     static_cast<const float*>(w.data), N, K);
+                break;
+            case GGML_TYPE_F16:
+                cpu_matmul_transposed_f16(out, x, w.data, N, K);
                 break;
             case GGML_TYPE_Q8_0:
                 cpu_matmul_transposed_q8_0(out, x, w.data, N, K);

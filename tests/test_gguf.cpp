@@ -1095,6 +1095,45 @@ void test_fp8_e5m2_conversion() {
     PASS();
 }
 
+void test_cpu_matmul_transposed_f16() {
+    TEST(cpu_matmul_transposed_f16);
+
+    // Build a 2×4 weight matrix in F16 format.
+    // Row 0: [1.0, 0.0, 0.0, 0.0] — 1.0=0x3C00, 0.0=0x0000
+    // Row 1: [0.0, 2.0, 0.0, 0.0] — 2.0=0x4000
+    // x = [1.0, 2.0, 3.0, 4.0]
+    // Expected: out[0] = 1.0*1.0 = 1.0, out[1] = 2.0*2.0 = 4.0
+    const int N = 2, K = 4;
+    uint16_t w[N * K] = {
+        0x3C00, 0x0000, 0x0000, 0x0000,  // row 0: [1.0, 0.0, 0.0, 0.0]
+        0x0000, 0x4000, 0x0000, 0x0000,  // row 1: [0.0, 2.0, 0.0, 0.0]
+    };
+    float x[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float out[2] = {};
+
+    cpu_matmul_transposed_f16(out, x, w, N, K);
+
+    ASSERT_NEAR(out[0], 1.0f, 1e-4f);
+    ASSERT_NEAR(out[1], 4.0f, 1e-4f);
+
+    // Cross-check: dequantize then matmul must give the same result
+    float w_f32[N * K];
+    dequantize(w, w_f32, N * K, GGML_TYPE_F16);
+    float out_ref[2] = {};
+    cpu_matmul_transposed(out_ref, x, w_f32, N, K);
+    ASSERT_NEAR(out[0], out_ref[0], 1e-4f);
+    ASSERT_NEAR(out[1], out_ref[1], 1e-4f);
+
+    // Non-trivial: row of all 2.0 weights, x = all ones → dot = 4 * 2.0 = 8.0
+    uint16_t w2[1 * K] = {0x4000, 0x4000, 0x4000, 0x4000};
+    float x2[K] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float out2[1] = {};
+    cpu_matmul_transposed_f16(out2, x2, w2, 1, K);
+    ASSERT_NEAR(out2[0], 8.0f, 1e-4f);
+
+    PASS();
+}
+
 void test_cpu_matmul_transposed_f8_e4m3() {
     TEST(cpu_matmul_transposed_f8_e4m3);
 
@@ -1224,6 +1263,9 @@ int main() {
     test_fp8_e5m2_conversion();
     test_cpu_matmul_transposed_f8_e4m3();
     test_cpu_matmul_transposed_f8_e5m2();
+
+    fprintf(stderr, "\nF16 direct computation tests:\n");
+    test_cpu_matmul_transposed_f16();
 
     fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
             tests_passed, tests_failed);
