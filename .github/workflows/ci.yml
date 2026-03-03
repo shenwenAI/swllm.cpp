@@ -1,0 +1,23 @@
+name: CI Build & Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure CMake
+      run: cmake -B build -DLLM_OPENMP=OFF
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Test
+      run: cd build && ctest --output-on-failure
