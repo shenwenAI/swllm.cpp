@@ -590,6 +590,13 @@ void test_compute_cpu() {
     PASS();
 }
 
+void test_backend_names() {
+    TEST(backend_names);
+    ASSERT_EQ(strcmp(backend_name(Backend::CPU), "CPU"), 0);
+    ASSERT_EQ(strcmp(backend_name(Backend::CUDA), "CUDA"), 0);
+    PASS();
+}
+
 // ---- Qwen3 config tests ----
 
 void test_qwen3_config() {
@@ -1067,6 +1074,7 @@ int main() {
 
     fprintf(stderr, "\nCompute dispatcher tests:\n");
     test_compute_cpu();
+    test_backend_names();
 
     fprintf(stderr, "\nQwen3 config tests:\n");
     test_qwen3_config();

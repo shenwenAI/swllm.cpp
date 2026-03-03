@@ -33,10 +33,20 @@ bool cuda_check_gpu() {
         fprintf(stderr, "Failed to query CUDA device properties.\n");
         return false;
     }
-    fprintf(stderr, "GPU: %s (compute %d.%d, %.0f MB, %d SMs)\n",
-            prop.name, prop.major, prop.minor,
-            prop.totalGlobalMem / (1024.0 * 1024.0),
-            prop.multiProcessorCount);
+    size_t free_mem = 0, total_mem_query = 0;
+    bool mem_info_ok = (cudaMemGetInfo(&free_mem, &total_mem_query) == cudaSuccess);
+    if (mem_info_ok) {
+        fprintf(stderr, "GPU: %s (compute %d.%d, %.0f MB total, %.0f MB free, %d SMs)\n",
+                prop.name, prop.major, prop.minor,
+                prop.totalGlobalMem / (1024.0 * 1024.0),
+                free_mem / (1024.0 * 1024.0),
+                prop.multiProcessorCount);
+    } else {
+        fprintf(stderr, "GPU: %s (compute %d.%d, %.0f MB, %d SMs)\n",
+                prop.name, prop.major, prop.minor,
+                prop.totalGlobalMem / (1024.0 * 1024.0),
+                prop.multiProcessorCount);
+    }
     return true;
 }
 
