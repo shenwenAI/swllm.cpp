@@ -211,14 +211,31 @@ inline void dequantize(const void* src, float* dst, int64_t n, GGMLType type) {
     }
 }
 
+// Fused F16 weight + transposed matmul: out[N] = x[K] · W[N×K]
+// W is in F16 (half-precision) format: each element is 2 bytes.  Values are
+// converted to F32 on-the-fly during accumulation so weight memory stays at
+// ~2 bytes/element instead of 4 bytes/element.
+inline void cpu_matmul_transposed_f16(float* out, const float* x,
+                                      const void* w, int N, int K) {
+    const uint16_t* wptr = static_cast<const uint16_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint16_t* row = wptr + static_cast<size_t>(i) * K;
+        for (int k = 0; k < K; k++) {
+            sum += x[k] * fp16_to_fp32(row[k]);
+        }
+        out[i] = sum;
+    }
+}
+
 // ---- Lightweight quantized weight handle ----
 
-// Holds a raw (potentially quantized) weight tensor.  For Q4_0 and Q8_0 the
-// data pointer points directly into the GGUF file's owned_data buffer, so no
-// extra allocation or dequantization is needed at load time.  For F32 the
-// pointer may also point into the file buffer.  F16 is converted to F32 at
-// load time (stored in weight_storage) because no fused F16 matmul is
-// provided.
+// Holds a raw (potentially quantized) weight tensor.  For Q4_0, Q8_0, F16,
+// and F32 the data pointer points directly into the GGUF file's owned_data
+// buffer, so no extra allocation or dequantization is needed at load time.
 struct QuantWeight {
     const void* data = nullptr;
     GGMLType type = GGML_TYPE_F32;
@@ -600,6 +617,9 @@ struct Compute {
             case GGML_TYPE_F32:
                 cpu_matmul_transposed(out, x,
                     static_cast<const float*>(w.data), N, K);
+                break;
+            case GGML_TYPE_F16:
+                cpu_matmul_transposed_f16(out, x, w.data, N, K);
                 break;
             case GGML_TYPE_Q8_0:
                 cpu_matmul_transposed_q8_0(out, x, w.data, N, K);

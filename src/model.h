@@ -447,9 +447,8 @@ private:
     }
 
     // Load a weight tensor keeping it in its native quantization format.
-    // For Q4_0/Q8_0/F32: returns a pointer directly into the GGUF file buffer
-    // (no copy, no allocation).  For F16: dequantizes to F32 in weight_storage
-    // (no fused F16 matmul kernel is provided).
+    // For Q4_0/Q8_0/F16/F32: returns a pointer directly into the GGUF file
+    // buffer (no copy, no allocation).
     // This is used for large projection matrices to preserve memory bandwidth.
     QuantWeight load_tensor_raw(const std::string& name,
                                 int64_t expected_elements = -1,
@@ -476,17 +475,9 @@ private:
             return {};
         }
 
-        if (info.type == GGML_TYPE_F16) {
-            // No fused F16 matmul kernel — convert to F32 once at load time
-            weight_storage.emplace_back(n);
-            float* fdata = weight_storage.back().data();
-            dequantize_f16(raw, fdata, n);
-            return {fdata, GGML_TYPE_F32};
-        }
-
-        // F32 and integer-quantized types: use the raw GGUF pointer directly.
-        // gguf.owned_data (or the mmap region) owns this memory and lives as
-        // long as the Model object does.
+        // F32 and all natively-supported quantized/float types: use the raw
+        // GGUF pointer directly.  gguf.owned_data (or the mmap region) owns
+        // this memory and lives as long as the Model object does.
         return {raw, info.type};
     }
 
