@@ -1,1 +1,0 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/test_gguf.dir/link.d CMakeFiles/test_gguf.dir/tests/test_gguf.cpp.o -o test_gguf  -lm
