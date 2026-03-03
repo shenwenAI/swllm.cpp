@@ -191,6 +191,9 @@ inline void cpu_matmul_transposed(float* out, const float* x, const float* w, in
 // int8 values (34 bytes total per block).  Weights are never expanded to F32
 // in memory — each scale+value pair is consumed once, keeping weight traffic
 // at ~1 byte/element instead of 4 bytes/element.
+// The scale is hoisted out of the inner accumulation: the 32 products
+// x[j]*vals[j] are summed as floats first, then multiplied by the block
+// scale once, reducing multiply count from 2×32 to 32+1 per block.
 inline void cpu_matmul_transposed_q8_0(float* out, const float* x,
                                        const void* w, int N, int K) {
     const int bytes_per_block = 34; // 2-byte f16 scale + 32 int8 values
@@ -209,9 +212,13 @@ inline void cpu_matmul_transposed_q8_0(float* out, const float* x,
             float scale = fp16_to_fp32(scale_h);
             const int8_t* vals = reinterpret_cast<const int8_t*>(row + 2);
             const float* xb = x + b * 32;
+            // Accumulate the unscaled block dot product first, then apply
+            // the block scale once — reduces multiplications from 64 to 33.
+            float block_sum = 0.0f;
             for (int j = 0; j < 32; j++) {
-                sum += xb[j] * static_cast<float>(vals[j]) * scale;
+                block_sum += xb[j] * static_cast<float>(vals[j]);
             }
+            sum += block_sum * scale;
             row += bytes_per_block;
         }
         out[i] = sum;
@@ -221,6 +228,9 @@ inline void cpu_matmul_transposed_q8_0(float* out, const float* x,
 // Fused Q4_0 dequantize + transposed matmul: out[N] = x[K] · W[N×K]
 // W is in Q4_0 format: for every 32-element block, 2 bytes f16 scale then 16
 // nibble bytes (18 bytes total per block).
+// The scale is hoisted out of the inner accumulation: the 32 unscaled
+// products are summed first, then multiplied by the block scale once,
+// reducing multiply count from 64 to 33 per block.
 inline void cpu_matmul_transposed_q4_0(float* out, const float* x,
                                        const void* w, int N, int K) {
     const int bytes_per_block = 18; // 2-byte f16 scale + 16 nibble bytes
@@ -239,13 +249,17 @@ inline void cpu_matmul_transposed_q4_0(float* out, const float* x,
             float scale = fp16_to_fp32(scale_h);
             const uint8_t* nibbles = row + 2;
             const float* xb = x + b * 32;
+            // Accumulate the unscaled block dot product first, then apply
+            // the block scale once — reduces multiplications from 64 to 33.
+            float block_sum = 0.0f;
             for (int j = 0; j < 16; j++) {
                 uint8_t byte = nibbles[j];
                 // Q4_0 stores 4-bit unsigned values in range [0,15], offset by
                 // 8 so that the represented range is [-8, 7].
-                sum += xb[j]      * (static_cast<float>(static_cast<int>(byte & 0x0F) - 8) * scale);
-                sum += xb[j + 16] * (static_cast<float>(static_cast<int>(byte >> 4)  - 8) * scale);
+                block_sum += xb[j]      * static_cast<float>(static_cast<int>(byte & 0x0F) - 8);
+                block_sum += xb[j + 16] * static_cast<float>(static_cast<int>(byte >> 4)  - 8);
             }
+            sum += block_sum * scale;
             row += bytes_per_block;
         }
         out[i] = sum;
@@ -388,6 +402,9 @@ inline void cpu_rope_neox(float* q, float* k, int q_dim, int k_dim, int head_dim
 
 // Element-wise add: out = a + b
 inline void cpu_add(float* out, const float* a, const float* b, int n) {
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
     for (int i = 0; i < n; i++) out[i] = a[i] + b[i];
 }
 

@@ -278,6 +278,69 @@ void test_cpu_matmul_transposed_q8_0() {
     PASS();
 }
 
+void test_cpu_matmul_transposed_q4_0() {
+    TEST(cpu_matmul_transposed_q4_0);
+
+    // Build a 2×32 weight matrix in Q4_0 format (N=2, K=32).
+    // Q4_0 block layout: 2 bytes f16 scale, then 16 nibble bytes = 18 bytes/block.
+    // Each nibble encodes a value in [0,15]; the represented weight is (nibble - 8).
+    //
+    // Row 0: scale=1.0 (f16=0x3C00), all nibbles=0x88 => each weight = 0
+    //        (lower nibble 8-8=0, upper nibble 8-8=0) → dot product = 0
+    // Row 1: scale=1.0 (f16=0x3C00), nibble pattern:
+    //        lower nibble = 9 (weight=+1), upper nibble = 7 (weight=-1)
+    //        for all 16 bytes: +1 for x[0..15], -1 for x[16..31]
+    const int N = 2, K = 32;
+    const int bytes_per_block = 18; // 2-byte f16 scale + 16 nibble bytes
+    std::vector<uint8_t> w_q4(static_cast<size_t>(N) * bytes_per_block, 0);
+
+    uint16_t scale1 = 0x3C00; // 1.0 in f16
+    memcpy(w_q4.data(), &scale1, 2);
+    // Row 0: all nibbles = 0x88 → lower=8-8=0, upper=8-8=0
+    for (int j = 0; j < 16; j++) w_q4[2 + j] = 0x88;
+
+    uint16_t scale2 = 0x3C00; // 1.0 in f16
+    memcpy(w_q4.data() + bytes_per_block, &scale2, 2);
+    // Row 1: nibbles = 0x79 → lower=9-8=+1, upper=7-8=-1
+    for (int j = 0; j < 16; j++) w_q4[bytes_per_block + 2 + j] = 0x79;
+
+    // x = [1, 1, ..., 1]  (K=32 ones)
+    std::vector<float> x(K, 1.0f);
+    std::vector<float> out(N, 0.0f);
+
+    cpu_matmul_transposed_q4_0(out.data(), x.data(), w_q4.data(), N, K);
+
+    // Row 0: all weights = 0 → dot = 0
+    ASSERT_NEAR(out[0], 0.0f, 1e-4f);
+    // Row 1: 16 * (+1) + 16 * (-1) = 0
+    ASSERT_NEAR(out[1], 0.0f, 1e-4f);
+
+    // Cross-check: dequantize then matmul must give the same result
+    std::vector<float> w_f32(static_cast<size_t>(N) * K);
+    dequantize(w_q4.data(), w_f32.data(), static_cast<int64_t>(N) * K, GGML_TYPE_Q4_0);
+    std::vector<float> out_ref(N, 0.0f);
+    cpu_matmul_transposed(out_ref.data(), x.data(), w_f32.data(), N, K);
+    ASSERT_NEAR(out[0], out_ref[0], 1e-4f);
+    ASSERT_NEAR(out[1], out_ref[1], 1e-4f);
+
+    // Non-trivial case: x alternates [1, -1, 1, -1, ...]
+    // Row 1 weights: +1 for positions 0-15, -1 for positions 16-31
+    // dot = sum_{j=0}^{15} x[j]*1 + sum_{j=16}^{31} x[j]*(-1)
+    //     = (8 ones + 8 neg-ones) + (-(8 ones + 8 neg-ones)) = 0
+    std::vector<float> x2(K);
+    for (int j = 0; j < K; j++) x2[j] = (j % 2 == 0) ? 1.0f : -1.0f;
+    std::vector<float> out2(N, 0.0f);
+    cpu_matmul_transposed_q4_0(out2.data(), x2.data(), w_q4.data(), N, K);
+
+    // Verify against dequantize reference
+    std::vector<float> out2_ref(N, 0.0f);
+    cpu_matmul_transposed(out2_ref.data(), x2.data(), w_f32.data(), N, K);
+    ASSERT_NEAR(out2[0], out2_ref[0], 1e-4f);
+    ASSERT_NEAR(out2[1], out2_ref[1], 1e-4f);
+
+    PASS();
+}
+
 void test_cpu_silu() {
     TEST(cpu_silu);
 
@@ -988,6 +1051,7 @@ int main() {
     test_cpu_matmul();
     test_cpu_matmul_transposed();
     test_cpu_matmul_transposed_q8_0();
+    test_cpu_matmul_transposed_q4_0();
     test_cpu_silu();
     test_cpu_add();
     test_cpu_rope();
