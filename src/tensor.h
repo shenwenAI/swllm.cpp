@@ -267,6 +267,115 @@ inline void cpu_matmul_transposed_q4_0(float* out, const float* x,
 }
 
 // RMS normalization: out = x * w / rms(x)
+
+#ifdef LLM_USE_AVX2
+#include <immintrin.h>
+
+// Horizontally sum 8 floats stored in a 256-bit vector.
+static inline float hsum256_ps(__m256 v) {
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    lo = _mm_add_ps(lo, hi);
+    lo = _mm_hadd_ps(lo, lo);
+    lo = _mm_hadd_ps(lo, lo);
+    return _mm_cvtss_f32(lo);
+}
+
+// AVX2-accelerated fused Q8_0 dequantize + transposed matmul.
+// Processes 8 elements per SIMD lane, keeping weight data in compact format.
+inline void cpu_matmul_transposed_q8_0_avx2(float* out, const float* x,
+                                             const void* w, int N, int K) {
+    const int bytes_per_block = 34;
+    const int blocks_per_row = K / 32;
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        __m256 acc = _mm256_setzero_ps();
+        const uint8_t* row = wptr +
+            static_cast<size_t>(i) * blocks_per_row * bytes_per_block;
+        for (int b = 0; b < blocks_per_row; b++) {
+            uint16_t scale_h;
+            memcpy(&scale_h, row, 2);
+            float scale = fp16_to_fp32(scale_h);
+            __m256 vscale = _mm256_set1_ps(scale);
+            const int8_t* vals = reinterpret_cast<const int8_t*>(row + 2);
+            const float* xb = x + b * 32;
+            __m256 block_acc = _mm256_setzero_ps();
+            for (int j = 0; j < 32; j += 8) {
+                // Load 8 int8 values into the lower 8 bytes of a 128-bit register,
+                // then sign-extend each to 32 bits.
+                __m128i vi8 = _mm_loadl_epi64(
+                    reinterpret_cast<const __m128i*>(vals + j));
+                __m256i vi32 = _mm256_cvtepi8_epi32(vi8);
+                __m256 vf   = _mm256_cvtepi32_ps(vi32);
+                __m256 vx   = _mm256_loadu_ps(xb + j);
+                block_acc   = _mm256_fmadd_ps(vx, vf, block_acc);
+            }
+            // Scale the whole block accumulator once
+            acc = _mm256_fmadd_ps(block_acc, vscale, acc);
+            row += bytes_per_block;
+        }
+        out[i] = hsum256_ps(acc);
+    }
+}
+
+// AVX2-accelerated fused Q4_0 dequantize + transposed matmul.
+inline void cpu_matmul_transposed_q4_0_avx2(float* out, const float* x,
+                                             const void* w, int N, int K) {
+    const int bytes_per_block = 18;
+    const int blocks_per_row = K / 32;
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        __m256 acc = _mm256_setzero_ps();
+        const uint8_t* row = wptr +
+            static_cast<size_t>(i) * blocks_per_row * bytes_per_block;
+        for (int b = 0; b < blocks_per_row; b++) {
+            uint16_t scale_h;
+            memcpy(&scale_h, row, 2);
+            float scale = fp16_to_fp32(scale_h);
+            __m256 vscale = _mm256_set1_ps(scale);
+            const uint8_t* nibbles = row + 2;
+            const float* xb = x + b * 32;
+            // Load all 16 nibble bytes at once
+            __m128i raw = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(nibbles));
+            // Low nibbles  → weight elements 0..15
+            __m128i lo = _mm_and_si128(raw, _mm_set1_epi8(0x0F));
+            // High nibbles → weight elements 16..31
+            __m128i hi = _mm_and_si128(_mm_srli_epi16(raw, 4),
+                                        _mm_set1_epi8(0x0F));
+            // Subtract 8 to recover signed values in [-8, 7]
+            __m128i offset = _mm_set1_epi8(8);
+            lo = _mm_sub_epi8(lo, offset);
+            hi = _mm_sub_epi8(hi, offset);
+            __m256 block_acc = _mm256_setzero_ps();
+            // lo[0..7] × x[0..7]
+            __m256 vf0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo));
+            block_acc = _mm256_fmadd_ps(_mm256_loadu_ps(xb), vf0, block_acc);
+            // lo[8..15] × x[8..15]
+            __m256 vf1 = _mm256_cvtepi32_ps(
+                _mm256_cvtepi8_epi32(_mm_srli_si128(lo, 8)));
+            block_acc = _mm256_fmadd_ps(_mm256_loadu_ps(xb + 8), vf1, block_acc);
+            // hi[0..7] × x[16..23]
+            __m256 vf2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi));
+            block_acc = _mm256_fmadd_ps(_mm256_loadu_ps(xb + 16), vf2, block_acc);
+            // hi[8..15] × x[24..31]
+            __m256 vf3 = _mm256_cvtepi32_ps(
+                _mm256_cvtepi8_epi32(_mm_srli_si128(hi, 8)));
+            block_acc = _mm256_fmadd_ps(_mm256_loadu_ps(xb + 24), vf3, block_acc);
+            acc = _mm256_fmadd_ps(block_acc, vscale, acc);
+            row += bytes_per_block;
+        }
+        out[i] = hsum256_ps(acc);
+    }
+}
+#endif // LLM_USE_AVX2
+
 inline void cpu_rmsnorm(float* out, const float* x, const float* w, int n, float eps) {
     float ss = 0.0f;
     for (int i = 0; i < n; i++) ss += x[i] * x[i];
@@ -462,10 +571,18 @@ struct Compute {
                     static_cast<const float*>(w.data), N, K);
                 break;
             case GGML_TYPE_Q8_0:
+#ifdef LLM_USE_AVX2
+                cpu_matmul_transposed_q8_0_avx2(out, x, w.data, N, K);
+#else
                 cpu_matmul_transposed_q8_0(out, x, w.data, N, K);
+#endif
                 break;
             case GGML_TYPE_Q4_0:
+#ifdef LLM_USE_AVX2
+                cpu_matmul_transposed_q4_0_avx2(out, x, w.data, N, K);
+#else
                 cpu_matmul_transposed_q4_0(out, x, w.data, N, K);
+#endif
                 break;
             default: {
                 // Generic fallback for other quantized types

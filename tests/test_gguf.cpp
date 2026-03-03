@@ -341,6 +341,82 @@ void test_cpu_matmul_transposed_q4_0() {
     PASS();
 }
 
+#ifdef LLM_USE_AVX2
+void test_cpu_matmul_transposed_q8_0_avx2() {
+    TEST(cpu_matmul_transposed_q8_0_avx2);
+
+    // Same weight matrix as the scalar test: verify AVX2 path gives identical results.
+    const int N = 2, K = 32;
+    const int bytes_per_block = 34;
+    std::vector<uint8_t> w_q8(static_cast<size_t>(N) * bytes_per_block);
+
+    uint16_t scale1 = 0x3C00; // 1.0 in f16
+    memcpy(w_q8.data(), &scale1, 2);
+    for (int j = 0; j < 32; j++) w_q8[2 + j] = static_cast<uint8_t>(j + 1);
+
+    uint16_t scale2 = 0x4000; // 2.0 in f16
+    memcpy(w_q8.data() + bytes_per_block, &scale2, 2);
+    for (int j = 0; j < 32; j++) w_q8[bytes_per_block + 2 + j] = static_cast<uint8_t>(j + 1);
+
+    std::vector<float> x(K, 1.0f);
+    std::vector<float> out_avx2(N, 0.0f);
+    std::vector<float> out_ref(N, 0.0f);
+
+    cpu_matmul_transposed_q8_0_avx2(out_avx2.data(), x.data(), w_q8.data(), N, K);
+    cpu_matmul_transposed_q8_0(out_ref.data(), x.data(), w_q8.data(), N, K);
+
+    for (int i = 0; i < N; i++) ASSERT_NEAR(out_avx2[i], out_ref[i], 1e-4f);
+
+    // Non-trivial x: alternating values
+    std::vector<float> x2(K);
+    for (int j = 0; j < K; j++) x2[j] = static_cast<float>(j % 4) - 1.5f;
+    std::vector<float> out2_avx2(N, 0.0f);
+    std::vector<float> out2_ref(N, 0.0f);
+    cpu_matmul_transposed_q8_0_avx2(out2_avx2.data(), x2.data(), w_q8.data(), N, K);
+    cpu_matmul_transposed_q8_0(out2_ref.data(), x2.data(), w_q8.data(), N, K);
+    for (int i = 0; i < N; i++) ASSERT_NEAR(out2_avx2[i], out2_ref[i], 1e-3f);
+
+    PASS();
+}
+
+void test_cpu_matmul_transposed_q4_0_avx2() {
+    TEST(cpu_matmul_transposed_q4_0_avx2);
+
+    // Same weight matrix as the scalar test: verify AVX2 path gives identical results.
+    const int N = 2, K = 32;
+    const int bytes_per_block = 18;
+    std::vector<uint8_t> w_q4(static_cast<size_t>(N) * bytes_per_block, 0);
+
+    uint16_t scale1 = 0x3C00; // 1.0 in f16
+    memcpy(w_q4.data(), &scale1, 2);
+    for (int j = 0; j < 16; j++) w_q4[2 + j] = 0x88; // all-zero weights
+
+    uint16_t scale2 = 0x3C00; // 1.0 in f16
+    memcpy(w_q4.data() + bytes_per_block, &scale2, 2);
+    for (int j = 0; j < 16; j++) w_q4[bytes_per_block + 2 + j] = 0x79; // +1/-1 pattern
+
+    std::vector<float> x(K, 1.0f);
+    std::vector<float> out_avx2(N, 0.0f);
+    std::vector<float> out_ref(N, 0.0f);
+
+    cpu_matmul_transposed_q4_0_avx2(out_avx2.data(), x.data(), w_q4.data(), N, K);
+    cpu_matmul_transposed_q4_0(out_ref.data(), x.data(), w_q4.data(), N, K);
+
+    for (int i = 0; i < N; i++) ASSERT_NEAR(out_avx2[i], out_ref[i], 1e-4f);
+
+    // Non-trivial x: alternating values
+    std::vector<float> x2(K);
+    for (int j = 0; j < K; j++) x2[j] = static_cast<float>(j % 4) - 1.5f;
+    std::vector<float> out2_avx2(N, 0.0f);
+    std::vector<float> out2_ref(N, 0.0f);
+    cpu_matmul_transposed_q4_0_avx2(out2_avx2.data(), x2.data(), w_q4.data(), N, K);
+    cpu_matmul_transposed_q4_0(out2_ref.data(), x2.data(), w_q4.data(), N, K);
+    for (int i = 0; i < N; i++) ASSERT_NEAR(out2_avx2[i], out2_ref[i], 1e-4f);
+
+    PASS();
+}
+#endif // LLM_USE_AVX2
+
 void test_cpu_silu() {
     TEST(cpu_silu);
 
@@ -1052,6 +1128,11 @@ int main() {
     test_cpu_matmul_transposed();
     test_cpu_matmul_transposed_q8_0();
     test_cpu_matmul_transposed_q4_0();
+#ifdef LLM_USE_AVX2
+    fprintf(stderr, "\nAVX2 kernel tests:\n");
+    test_cpu_matmul_transposed_q8_0_avx2();
+    test_cpu_matmul_transposed_q4_0_avx2();
+#endif
     test_cpu_silu();
     test_cpu_add();
     test_cpu_rope();
