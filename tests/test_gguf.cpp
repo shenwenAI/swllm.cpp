@@ -341,6 +341,44 @@ void test_cpu_matmul_transposed_q4_0() {
     PASS();
 }
 
+void test_cpu_matmul_transposed_f16() {
+    TEST(cpu_matmul_transposed_f16);
+
+    // Build a 2×4 weight matrix in F16 format (N=2, K=4).
+    // Row 0: [1.0, 2.0, 3.0, 4.0]
+    // Row 1: [0.5, -0.5, 1.0, -1.0]
+    const int N = 2, K = 4;
+    // F16 bit patterns for values used
+    // 1.0  = 0x3C00, 2.0  = 0x4000, 3.0  = 0x4200, 4.0  = 0x4400
+    // 0.5  = 0x3800, -0.5 = 0xB800, -1.0 = 0xBC00
+    uint16_t row0[4] = {0x3C00, 0x4000, 0x4200, 0x4400};
+    uint16_t row1[4] = {0x3800, 0xB800, 0x3C00, 0xBC00};
+    std::vector<uint16_t> w_f16(static_cast<size_t>(N) * K);
+    memcpy(w_f16.data(),     row0, K * sizeof(uint16_t));
+    memcpy(w_f16.data() + K, row1, K * sizeof(uint16_t));
+
+    // x = [1, 1, 1, 1]
+    std::vector<float> x(K, 1.0f);
+    std::vector<float> out(N, 0.0f);
+
+    cpu_matmul_transposed_f16(out.data(), x.data(), w_f16.data(), N, K);
+
+    // out[0] = 1+2+3+4 = 10
+    // out[1] = 0.5-0.5+1.0-1.0 = 0
+    ASSERT_NEAR(out[0], 10.0f, 1e-4f);
+    ASSERT_NEAR(out[1], 0.0f, 1e-4f);
+
+    // Cross-check: dequantize then matmul must give the same result
+    std::vector<float> w_f32(static_cast<size_t>(N) * K);
+    dequantize(w_f16.data(), w_f32.data(), static_cast<int64_t>(N) * K, GGML_TYPE_F16);
+    std::vector<float> out_ref(N, 0.0f);
+    cpu_matmul_transposed(out_ref.data(), x.data(), w_f32.data(), N, K);
+    ASSERT_NEAR(out[0], out_ref[0], 1e-4f);
+    ASSERT_NEAR(out[1], out_ref[1], 1e-4f);
+
+    PASS();
+}
+
 void test_cpu_silu() {
     TEST(cpu_silu);
 
@@ -1052,6 +1090,7 @@ int main() {
     test_cpu_matmul_transposed();
     test_cpu_matmul_transposed_q8_0();
     test_cpu_matmul_transposed_q4_0();
+    test_cpu_matmul_transposed_f16();
     test_cpu_silu();
     test_cpu_add();
     test_cpu_rope();
