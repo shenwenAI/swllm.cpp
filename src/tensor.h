@@ -57,6 +57,72 @@ inline float fp16_to_fp32(uint16_t h) {
     return f;
 }
 
+// ---- FP8 conversion ----
+
+// Convert FP8 E4M3FN (1 sign + 4 exponent + 3 mantissa, bias=7, no Inf) to FP32.
+// NaN is represented only by 0x7F (+NaN) and 0xFF (-NaN).
+inline float fp8_e4m3_to_fp32(uint8_t h) {
+    uint32_t s = static_cast<uint32_t>(h >> 7) << 31;
+    uint32_t e = static_cast<uint32_t>((h >> 3) & 0x0F);
+    uint32_t m = static_cast<uint32_t>(h & 0x07);
+
+    if (e == 0x0F && m == 0x07) {
+        // NaN (0x7F or 0xFF)
+        uint32_t nan_val = s | 0x7FC00000u;
+        float f; memcpy(&f, &nan_val, sizeof(f)); return f;
+    }
+
+    uint32_t result;
+    if (e == 0) {
+        if (m == 0) {
+            result = s; // ±0
+        } else {
+            // Subnormal: value = (-1)^s * 2^(-6) * (0.m)_2 = m * 2^(-9)
+            // Normalize: find position of leading 1 bit in m (0..2)
+            int pos = 2;
+            while (pos > 0 && !(m & (1u << pos))) pos--;
+            int exp_val = pos - 9;
+            uint32_t frac = m & ((1u << pos) - 1u);
+            result = s | (static_cast<uint32_t>(exp_val + 127) << 23) | (frac << (23 - pos));
+        }
+    } else {
+        // Normal: value = (-1)^s * 2^(e-7) * (1 + m/8)
+        // FP32: biased_exp = e + 120, mantissa in bits [22:20]
+        result = s | ((e + 120u) << 23) | (m << 20);
+    }
+    float f; memcpy(&f, &result, sizeof(f)); return f;
+}
+
+// Convert FP8 E5M2 (1 sign + 5 exponent + 2 mantissa, bias=15) to FP32.
+// Supports Inf and NaN following the E5M2 specification.
+inline float fp8_e5m2_to_fp32(uint8_t h) {
+    uint32_t s = static_cast<uint32_t>(h >> 7) << 31;
+    uint32_t e = static_cast<uint32_t>((h >> 2) & 0x1F);
+    uint32_t m = static_cast<uint32_t>(h & 0x03);
+
+    uint32_t result;
+    if (e == 0x1F) {
+        result = (m == 0) ? (s | 0x7F800000u)  // ±Inf
+                          : (s | 0x7FC00000u);  // NaN
+    } else if (e == 0) {
+        if (m == 0) {
+            result = s; // ±0
+        } else {
+            // Subnormal: value = (-1)^s * 2^(-14) * (0.m)_2 = m * 2^(-16)
+            int pos = 1;
+            while (pos > 0 && !(m & (1u << pos))) pos--;
+            int exp_val = pos - 16;
+            uint32_t frac = m & ((1u << pos) - 1u);
+            result = s | (static_cast<uint32_t>(exp_val + 127) << 23) | (frac << (23 - pos));
+        }
+    } else {
+        // Normal: value = (-1)^s * 2^(e-15) * (1 + m/4)
+        // FP32: biased_exp = e + 112, mantissa in bits [22:21]
+        result = s | ((e + 112u) << 23) | (m << 21);
+    }
+    float f; memcpy(&f, &result, sizeof(f)); return f;
+}
+
 // ---- Dequantization ----
 
 // Dequantize Q4_0 block: 32 elements stored as 1 f16 scale + 16 bytes of nibbles
@@ -101,6 +167,22 @@ inline void dequantize_f16(const void* src, float* dst, int64_t n) {
     }
 }
 
+// Convert FP8 E4M3FN array to F32
+inline void dequantize_f8_e4m3(const void* src, float* dst, int64_t n) {
+    const uint8_t* data = static_cast<const uint8_t*>(src);
+    for (int64_t i = 0; i < n; i++) {
+        dst[i] = fp8_e4m3_to_fp32(data[i]);
+    }
+}
+
+// Convert FP8 E5M2 array to F32
+inline void dequantize_f8_e5m2(const void* src, float* dst, int64_t n) {
+    const uint8_t* data = static_cast<const uint8_t*>(src);
+    for (int64_t i = 0; i < n; i++) {
+        dst[i] = fp8_e5m2_to_fp32(data[i]);
+    }
+}
+
 // Dequantize any supported type to F32
 inline void dequantize(const void* src, float* dst, int64_t n, GGMLType type) {
     switch (type) {
@@ -115,6 +197,12 @@ inline void dequantize(const void* src, float* dst, int64_t n, GGMLType type) {
             break;
         case GGML_TYPE_Q8_0:
             dequantize_q8_0(src, dst, n);
+            break;
+        case GGML_TYPE_F8_E4M3:
+            dequantize_f8_e4m3(src, dst, n);
+            break;
+        case GGML_TYPE_F8_E5M2:
+            dequantize_f8_e5m2(src, dst, n);
             break;
         default:
             fprintf(stderr, "Error: unsupported quantization type %s for dequantization\n",
@@ -261,6 +349,47 @@ inline void cpu_matmul_transposed_q4_0(float* out, const float* x,
             }
             sum += block_sum * scale;
             row += bytes_per_block;
+        }
+        out[i] = sum;
+    }
+}
+
+// Fused FP8 E4M3FN dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is stored as 1 byte per element in FP8 E4M3FN format (no block structure).
+// Direct computation: each FP8 value is converted to F32 inline during the dot
+// product, keeping weight traffic at 1 byte/element instead of 4 bytes/element
+// and avoiding materialization of a full F32 weight buffer.
+inline void cpu_matmul_transposed_f8_e4m3(float* out, const float* x,
+                                           const void* w, int N, int K) {
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint8_t* row = wptr + static_cast<size_t>(i) * K;
+        for (int k = 0; k < K; k++) {
+            sum += x[k] * fp8_e4m3_to_fp32(row[k]);
+        }
+        out[i] = sum;
+    }
+}
+
+// Fused FP8 E5M2 dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is stored as 1 byte per element in FP8 E5M2 format (no block structure).
+// Direct computation: each FP8 value is converted to F32 inline during the dot
+// product, keeping weight traffic at 1 byte/element instead of 4 bytes/element.
+inline void cpu_matmul_transposed_f8_e5m2(float* out, const float* x,
+                                           const void* w, int N, int K) {
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint8_t* row = wptr + static_cast<size_t>(i) * K;
+        for (int k = 0; k < K; k++) {
+            sum += x[k] * fp8_e5m2_to_fp32(row[k]);
         }
         out[i] = sum;
     }
@@ -477,6 +606,12 @@ struct Compute {
                 break;
             case GGML_TYPE_Q4_0:
                 cpu_matmul_transposed_q4_0(out, x, w.data, N, K);
+                break;
+            case GGML_TYPE_F8_E4M3:
+                cpu_matmul_transposed_f8_e4m3(out, x, w.data, N, K);
+                break;
+            case GGML_TYPE_F8_E5M2:
+                cpu_matmul_transposed_f8_e5m2(out, x, w.data, N, K);
                 break;
             default: {
                 // Generic fallback for other quantized types

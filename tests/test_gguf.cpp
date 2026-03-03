@@ -46,9 +46,13 @@ void test_ggml_type_sizes() {
     ASSERT_EQ(ggml_type_size(GGML_TYPE_Q4_0), 18u); // 2 + 16
     ASSERT_EQ(ggml_type_size(GGML_TYPE_Q8_0), 34u); // 2 + 32
     ASSERT_EQ(ggml_type_size(GGML_TYPE_I32), 4u);
+    ASSERT_EQ(ggml_type_size(GGML_TYPE_F8_E4M3), 1u);
+    ASSERT_EQ(ggml_type_size(GGML_TYPE_F8_E5M2), 1u);
     ASSERT_EQ(ggml_block_size(GGML_TYPE_F32), 1u);
     ASSERT_EQ(ggml_block_size(GGML_TYPE_Q4_0), 32u);
     ASSERT_EQ(ggml_block_size(GGML_TYPE_Q8_0), 32u);
+    ASSERT_EQ(ggml_block_size(GGML_TYPE_F8_E4M3), 1u);
+    ASSERT_EQ(ggml_block_size(GGML_TYPE_F8_E5M2), 1u);
     PASS();
 }
 
@@ -58,6 +62,8 @@ void test_ggml_type_names() {
     ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_F16), "F16"), 0);
     ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_Q4_0), "Q4_0"), 0);
     ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_Q8_0), "Q8_0"), 0);
+    ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_F8_E4M3), "F8_E4M3"), 0);
+    ASSERT_EQ(strcmp(ggml_type_name(GGML_TYPE_F8_E5M2), "F8_E5M2"), 0);
     PASS();
 }
 
@@ -1033,6 +1039,133 @@ void test_gpt2_newline_chunking() {
     PASS();
 }
 
+// ---- FP8 conversion and matmul tests ----
+
+void test_fp8_e4m3_conversion() {
+    TEST(fp8_e4m3_conversion);
+
+    // Zero: 0x00 -> 0.0
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0x00), 0.0f, 1e-9f);
+    // Negative zero: 0x80 -> -0.0 (bit pattern same as +0.0 when compared as float)
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0x80), 0.0f, 1e-9f);
+
+    // Normal values: s=0, e=7, bias=7 -> 2^(7-7)*(1+m/8)
+    // 1.0: s=0 e=0111 m=000 -> 0b0_0111_000 = 0x38
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0x38), 1.0f, 1e-6f);
+    // 2.0: s=0 e=1000 m=000 -> 0b0_1000_000 = 0x40
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0x40), 2.0f, 1e-6f);
+    // 0.5: s=0 e=0110 m=000 -> 0b0_0110_000 = 0x30
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0x30), 0.5f, 1e-6f);
+    // 1.5: s=0 e=0111 m=100 -> 0b0_0111_100 = 0x3C, value = 2^0*(1+4/8) = 1.5
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0x3C), 1.5f, 1e-6f);
+    // -1.0: s=1 e=0111 m=000 -> 0b1_0111_000 = 0xB8
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0xB8), -1.0f, 1e-6f);
+
+    // Subnormal: e=0, value = m * 2^(-9)
+    // m=1: 0b0_0000_001 = 0x01, value = 1*2^(-9) = 1/512
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0x01), 1.0f / 512.0f, 1e-7f);
+    // m=4: 0b0_0000_100 = 0x04, value = 4*2^(-9) = 1/128
+    ASSERT_NEAR(fp8_e4m3_to_fp32(0x04), 4.0f / 512.0f, 1e-7f);
+
+    PASS();
+}
+
+void test_fp8_e5m2_conversion() {
+    TEST(fp8_e5m2_conversion);
+
+    // Zero: 0x00 -> 0.0
+    ASSERT_NEAR(fp8_e5m2_to_fp32(0x00), 0.0f, 1e-9f);
+
+    // Normal values: s=0, e=15, bias=15 -> 2^(15-15)*(1+m/4)
+    // 1.0: s=0 e=01111 m=00 -> 0b0_01111_00 = 0x3C
+    ASSERT_NEAR(fp8_e5m2_to_fp32(0x3C), 1.0f, 1e-6f);
+    // 2.0: s=0 e=10000 m=00 -> 0b0_10000_00 = 0x40
+    ASSERT_NEAR(fp8_e5m2_to_fp32(0x40), 2.0f, 1e-6f);
+    // 0.5: s=0 e=01110 m=00 -> 0b0_01110_00 = 0x38
+    ASSERT_NEAR(fp8_e5m2_to_fp32(0x38), 0.5f, 1e-6f);
+    // 1.5: s=0 e=01111 m=10 -> 0b0_01111_10 = 0x3E, value = 1*(1+2/4) = 1.5
+    ASSERT_NEAR(fp8_e5m2_to_fp32(0x3E), 1.5f, 1e-6f);
+    // -1.0: s=1 e=01111 m=00 -> 0b1_01111_00 = 0xBC
+    ASSERT_NEAR(fp8_e5m2_to_fp32(0xBC), -1.0f, 1e-6f);
+
+    // Subnormal: e=0, value = m * 2^(-16)
+    // m=1: 0b0_00000_01 = 0x01, value = 1*2^(-16)
+    ASSERT_NEAR(fp8_e5m2_to_fp32(0x01), 1.0f / 65536.0f, 1e-10f);
+
+    PASS();
+}
+
+void test_cpu_matmul_transposed_f8_e4m3() {
+    TEST(cpu_matmul_transposed_f8_e4m3);
+
+    // Build a 2×4 weight matrix in FP8 E4M3 format.
+    // Row 0: [1.0, 0.0, 0.0, 0.0] — 1.0=0x38, 0.0=0x00
+    // Row 1: [0.0, 1.0, 0.0, 0.0]
+    // x = [1.0, 2.0, 3.0, 4.0]
+    // Expected: out[0] = 1.0, out[1] = 2.0
+    const int N = 2, K = 4;
+    uint8_t w[N * K] = {
+        0x38, 0x00, 0x00, 0x00,  // row 0: [1.0, 0.0, 0.0, 0.0]
+        0x00, 0x38, 0x00, 0x00,  // row 1: [0.0, 1.0, 0.0, 0.0]
+    };
+    float x[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float out[2] = {};
+
+    cpu_matmul_transposed_f8_e4m3(out, x, w, N, K);
+
+    ASSERT_NEAR(out[0], 1.0f, 1e-4f);
+    ASSERT_NEAR(out[1], 2.0f, 1e-4f);
+
+    // Cross-check: dequantize then matmul must give the same result
+    float w_f32[N * K];
+    dequantize(w, w_f32, N * K, GGML_TYPE_F8_E4M3);
+    float out_ref[2] = {};
+    cpu_matmul_transposed(out_ref, x, w_f32, N, K);
+    ASSERT_NEAR(out[0], out_ref[0], 1e-4f);
+    ASSERT_NEAR(out[1], out_ref[1], 1e-4f);
+
+    // Non-trivial: row of all 2.0 weights (0x40), x = all ones
+    // out[0] = 4 * 2.0 = 8.0
+    uint8_t w2[1 * K] = {0x40, 0x40, 0x40, 0x40};
+    float x2[K] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float out2[1] = {};
+    cpu_matmul_transposed_f8_e4m3(out2, x2, w2, 1, K);
+    ASSERT_NEAR(out2[0], 8.0f, 1e-4f);
+
+    PASS();
+}
+
+void test_cpu_matmul_transposed_f8_e5m2() {
+    TEST(cpu_matmul_transposed_f8_e5m2);
+
+    // Build a 2×4 weight matrix in FP8 E5M2 format.
+    // Row 0: all 1.0 (0x3C), row 1: all 2.0 (0x40)
+    // x = [1.0, 1.0, 1.0, 1.0]
+    // Expected: out[0] = 4.0, out[1] = 8.0
+    const int N = 2, K = 4;
+    uint8_t w[N * K] = {
+        0x3C, 0x3C, 0x3C, 0x3C,  // row 0: [1.0, 1.0, 1.0, 1.0]
+        0x40, 0x40, 0x40, 0x40,  // row 1: [2.0, 2.0, 2.0, 2.0]
+    };
+    float x[] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float out[2] = {};
+
+    cpu_matmul_transposed_f8_e5m2(out, x, w, N, K);
+
+    ASSERT_NEAR(out[0], 4.0f, 1e-4f);
+    ASSERT_NEAR(out[1], 8.0f, 1e-4f);
+
+    // Cross-check: dequantize then matmul must give the same result
+    float w_f32[N * K];
+    dequantize(w, w_f32, N * K, GGML_TYPE_F8_E5M2);
+    float out_ref[2] = {};
+    cpu_matmul_transposed(out_ref, x, w_f32, N, K);
+    ASSERT_NEAR(out[0], out_ref[0], 1e-4f);
+    ASSERT_NEAR(out[1], out_ref[1], 1e-4f);
+
+    PASS();
+}
+
 // ---- Run all tests ----
 
 int main() {
@@ -1085,6 +1218,12 @@ int main() {
     test_context_auto_cap();
     test_special_token_encode();
     test_gpt2_newline_chunking();
+
+    fprintf(stderr, "\nFP8 type and computation tests:\n");
+    test_fp8_e4m3_conversion();
+    test_fp8_e5m2_conversion();
+    test_cpu_matmul_transposed_f8_e4m3();
+    test_cpu_matmul_transposed_f8_e5m2();
 
     fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
             tests_passed, tests_failed);
