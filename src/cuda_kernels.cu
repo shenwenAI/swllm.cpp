@@ -18,11 +18,13 @@
 
 // ---- GPU availability check ----
 
-bool cuda_check_gpu() {
+// Print information about the default CUDA device to stderr.
+// Returns true if at least one CUDA-capable device is present.
+bool cuda_print_gpu_info() {
     int device_count = 0;
     cudaError_t err = cudaGetDeviceCount(&device_count);
     if (err != cudaSuccess || device_count == 0) {
-        fprintf(stderr, "No CUDA-capable GPU detected.\n");
+        fprintf(stderr, "GPU:  (none detected)\n");
         return false;
     }
 
@@ -30,14 +32,21 @@ bool cuda_check_gpu() {
     cudaDeviceProp prop;
     if (cudaGetDevice(&device_id) != cudaSuccess ||
         cudaGetDeviceProperties(&prop, device_id) != cudaSuccess) {
-        fprintf(stderr, "Failed to query CUDA device properties.\n");
+        fprintf(stderr, "GPU:  (failed to query device properties)\n");
         return false;
     }
-    fprintf(stderr, "GPU: %s (compute %d.%d, %.0f MB, %d SMs)\n",
+    fprintf(stderr, "GPU:  %s (compute %d.%d, %.0f MB, %d SMs)\n",
             prop.name, prop.major, prop.minor,
             prop.totalGlobalMem / (1024.0 * 1024.0),
             prop.multiProcessorCount);
     return true;
+}
+
+// Quiet GPU availability check (no output). Returns true if a CUDA GPU is present.
+bool cuda_check_gpu() {
+    int device_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&device_count);
+    return err == cudaSuccess && device_count > 0;
 }
 
 static cublasHandle_t cublas_handle = nullptr;

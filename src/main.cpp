@@ -11,10 +11,75 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 #endif
 
 #include "model.h"
 #include "sampler.h"
+
+#ifdef LLM_USE_CUDA
+// Forward declaration – defined in cuda_kernels.cu
+bool cuda_print_gpu_info();
+#endif
+
+// Return CPU brand string (best-effort, cross-platform).
+static std::string get_cpu_name() {
+#if defined(_WIN32)
+    char buf[256] = {};
+    DWORD size = sizeof(buf);
+    HKEY key;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                      "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                      0, KEY_READ, &key) == ERROR_SUCCESS) {
+        RegQueryValueExA(key, "ProcessorNameString", nullptr, nullptr,
+                         reinterpret_cast<LPBYTE>(buf), &size);
+        RegCloseKey(key);
+    }
+    if (buf[0]) return buf;
+#elif defined(__APPLE__)
+    char buf[256] = {};
+    size_t size = sizeof(buf);
+    if (sysctlbyname("machdep.cpu.brand_string", buf, &size, nullptr, 0) == 0 && buf[0])
+        return buf;
+#else
+    // Linux - parse /proc/cpuinfo
+    FILE* f = fopen("/proc/cpuinfo", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "model name", 10) == 0) {
+                const char* colon = strchr(line, ':');
+                if (colon) {
+                    const char* start = colon + 1;
+                    while (*start == ' ' || *start == '\t') ++start;
+                    std::string name(start);
+                    // Strip trailing newline
+                    while (!name.empty() && (name.back() == '\n' || name.back() == '\r'))
+                        name.pop_back();
+                    fclose(f);
+                    return name;
+                }
+            }
+        }
+        fclose(f);
+    }
+#endif
+    return "Unknown CPU";
+}
+
+// Print CPU and GPU hardware information to stderr.
+static void print_hardware_info() {
+    fprintf(stderr, "CPU:  %s\n", get_cpu_name().c_str());
+#ifdef LLM_USE_CUDA
+    cuda_print_gpu_info();
+#else
+    fprintf(stderr, "GPU:  (not available - rebuild with -DLLM_CUDA=ON to enable)\n");
+#endif
+}
 
 struct RunConfig {
     std::string model_path;
@@ -352,6 +417,9 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 1;
     }
+
+    // Show CPU and GPU hardware information
+    print_hardware_info();
 
     // Check GPU support
     Backend backend = Backend::CPU;
