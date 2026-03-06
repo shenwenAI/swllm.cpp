@@ -1,4 +1,28 @@
 cmake_minimum_required(VERSION 3.16)
+
+# Help Windows users who run "cmake .." from a regular terminal (e.g.
+# PowerShell) without a Visual Studio environment.  CMake may default to the
+# "NMake Makefiles" generator, which fails if nmake is not on PATH.  Detect
+# this early and print actionable guidance instead of a cryptic error.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows" AND CMAKE_GENERATOR STREQUAL "NMake Makefiles")
+    find_program(_NMAKE_FOUND nmake)
+    if(NOT _NMAKE_FOUND)
+        message(FATAL_ERROR
+            "CMake selected the 'NMake Makefiles' generator but nmake was not found.\n"
+            "Please try one of the following:\n"
+            "  1. Open 'Developer Command Prompt for Visual Studio' and re-run cmake.\n"
+            "  2. Specify a generator with the -G flag, for example:\n"
+            "       cmake .. -G \"Visual Studio 17 2022\"\n"
+            "       cmake .. -G \"Visual Studio 16 2019\"\n"
+            "       cmake .. -G \"MinGW Makefiles\"\n"
+            "       cmake .. -G \"Ninja\"\n"
+            "  3. Use a CMake preset:\n"
+            "       cmake --preset windows-vs2022\n"
+            "       cmake --preset windows-vs2019\n"
+        )
+    endif()
+endif()
+
 project(llm_cpp LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)

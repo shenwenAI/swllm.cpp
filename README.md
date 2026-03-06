@@ -52,7 +52,19 @@ cmake .. -DLLM_OPENMP=OFF
 cmake --build . --config Release
 ```
 
+If you are using a **regular PowerShell or Command Prompt** (not the Developer prompt), you must specify a generator with `-G`:
+
+```powershell
+mkdir build && cd build
+cmake .. -G "Visual Studio 17 2022" -DLLM_OPENMP=OFF   # VS 2022
+cmake --build . --config Release
+```
+
 Or open the folder in Visual Studio (CMake is supported natively) and build from the IDE.
+
+> **Tip:** If you see an error like *"NMake Makefiles – nmake not found"*, it means
+> CMake could not detect a build environment. Either open a Developer Command Prompt
+> or pass `-G "Visual Studio 17 2022"` (or your VS version) to select the correct generator.
 
 > **Note:** On Windows the HTTP server links against `ws2_32` automatically. OpenMP can be enabled if your MSVC installation includes it (remove `-DLLM_OPENMP=OFF`).
 
