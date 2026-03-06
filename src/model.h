@@ -34,12 +34,24 @@ struct ModelConfig {
     int kv_dim = 0;             // derived: head_dim * num_kv_heads
     bool qkv_bias = false;      // Qwen3-style QKV bias
     bool rope_neox = false;     // neox-style (halved) RoPE for Qwen models
+    float partial_rotary_factor = 1.0f;  // Qwen3.5: 0.25
+    int rope_dim = 0;           // derived: head_dim * partial_rotary_factor
 
     // Qwen3.5 hybrid architecture
     bool is_hybrid = false;     // true for Qwen3.5 (mix of attention + GatedDeltaNet)
     std::vector<std::string> layer_types;  // "full_attention" or "linear_attention"
     int linear_key_head_dim = 0;
     int linear_value_head_dim = 0;
+    int linear_num_key_heads = 0;
+    int linear_num_value_heads = 0;
+    int linear_conv_kernel_dim = 0;
+
+    // MoE (Mixture of Experts) parameters
+    bool is_moe = false;
+    int num_experts = 0;
+    int num_experts_per_tok = 0;
+    int moe_intermediate_size = 0;
+    int shared_expert_intermediate_size = 0;
 };
 
 // ---- Transformer weights ----
@@ -629,14 +641,17 @@ private:
         hb2.resize(config.intermediate_size);
         logits.resize(config.vocab_size);
 
-        // Precompute RoPE frequency table: freqs[i] = 1 / theta^(2i / head_dim)
-        // Depends only on head_dim and rope_theta (both fixed at load time), so
-        // computing once here avoids a heap allocation on every forward() call.
-        int half_dim = config.head_dim / 2;
-        rope_freqs.resize(half_dim);
-        for (int i = 0; i < half_dim; i++) {
+        // Precompute RoPE frequency table: freqs[i] = 1 / theta^(2i / rope_dim)
+        // Depends only on head_dim, rope_dim and rope_theta (all fixed at load
+        // time), so computing once here avoids a heap allocation on every
+        // forward() call.  When partial_rotary_factor < 1.0 (e.g. Qwen3.5
+        // uses 0.25), only the first rope_dim positions get RoPE.
+        int rope_dim = config.rope_dim > 0 ? config.rope_dim : config.head_dim;
+        int half_rope = rope_dim / 2;
+        rope_freqs.resize(half_rope);
+        for (int i = 0; i < half_rope; i++) {
             rope_freqs[i] = 1.0f / powf(config.rope_theta,
-                                        static_cast<float>(2 * i) / config.head_dim);
+                                        static_cast<float>(2 * i) / rope_dim);
         }
     }
 
@@ -674,6 +689,15 @@ private:
         }
         if (config.is_hybrid) {
             fprintf(stderr, "  Hybrid: yes (Qwen3.5 attention + GatedDeltaNet)\n");
+        }
+        if (config.is_moe) {
+            fprintf(stderr, "  MoE: %d experts, %d active per token\n",
+                    config.num_experts, config.num_experts_per_tok);
+        }
+        if (config.partial_rotary_factor < 1.0f) {
+            fprintf(stderr, "  Partial rotary: %.0f%% (%d/%d dims)\n",
+                    config.partial_rotary_factor * 100.0f,
+                    config.rope_dim, config.head_dim);
         }
         if (is_hf_model) {
             fprintf(stderr, "  Format: HuggingFace SafeTensors (direct loading)\n");
@@ -716,6 +740,19 @@ private:
         config.layer_types = hf_config.layer_types;
         config.linear_key_head_dim = hf_config.linear_key_head_dim;
         config.linear_value_head_dim = hf_config.linear_value_head_dim;
+        config.linear_num_key_heads = hf_config.linear_num_key_heads;
+        config.linear_num_value_heads = hf_config.linear_num_value_heads;
+        config.linear_conv_kernel_dim = hf_config.linear_conv_kernel_dim;
+        config.partial_rotary_factor = static_cast<float>(hf_config.partial_rotary_factor);
+        config.rope_dim = static_cast<int>(config.head_dim * config.partial_rotary_factor);
+        if (config.rope_dim == 0) config.rope_dim = config.head_dim;
+
+        // MoE parameters
+        config.is_moe = hf_config.is_moe();
+        config.num_experts = hf_config.num_experts;
+        config.num_experts_per_tok = hf_config.num_experts_per_tok;
+        config.moe_intermediate_size = hf_config.moe_intermediate_size;
+        config.shared_expert_intermediate_size = hf_config.shared_expert_intermediate_size;
 
         // Set RoPE style for Qwen models
         std::string arch = config.architecture;

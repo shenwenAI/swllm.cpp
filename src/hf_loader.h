@@ -153,11 +153,21 @@ struct HFModelConfig {
     double rope_theta = 10000.0;
     int head_dim = 0;
     bool tie_word_embeddings = false;
+    double partial_rotary_factor = 1.0;  // Qwen3.5: 0.25 (64/256)
 
     // Qwen3.5-specific
     int linear_key_head_dim = 0;
     int linear_value_head_dim = 0;
+    int linear_num_key_heads = 0;
+    int linear_num_value_heads = 0;
+    int linear_conv_kernel_dim = 0;
     std::vector<std::string> layer_types;  // "full_attention" or "linear_attention"
+
+    // MoE-specific
+    int moe_intermediate_size = 0;
+    int shared_expert_intermediate_size = 0;
+    int num_experts_per_tok = 0;
+    int num_experts = 0;
 
     bool load(const std::string& config_path) {
         std::string json = read_file_to_string(config_path);
@@ -167,28 +177,61 @@ struct HFModelConfig {
         }
 
         model_type = hf_json_get_str(json, "model_type");
-        vocab_size = static_cast<int>(hf_json_get_int(json, "vocab_size", 0));
-        hidden_size = static_cast<int>(hf_json_get_int(json, "hidden_size", 0));
-        intermediate_size = static_cast<int>(hf_json_get_int(json, "intermediate_size", 0));
-        num_hidden_layers = static_cast<int>(hf_json_get_int(json, "num_hidden_layers", 0));
-        num_attention_heads = static_cast<int>(hf_json_get_int(json, "num_attention_heads", 0));
-        num_key_value_heads = static_cast<int>(hf_json_get_int(json, "num_key_value_heads",
+
+        // For VL (vision-language) models, the text model config is nested
+        // inside a "text_config" sub-object. Detect and extract it.
+        std::string text_json = json;
+        if (model_type == "qwen3_5" || model_type == "qwen3_5_moe") {
+            std::string nested = extract_text_config(json);
+            if (!nested.empty()) {
+                text_json = nested;
+                // Re-read model_type from nested config
+                std::string nested_type = hf_json_get_str(text_json, "model_type");
+                if (!nested_type.empty()) model_type = nested_type;
+            }
+        }
+
+        // Parse from text config (may be nested or top-level)
+        vocab_size = static_cast<int>(hf_json_get_int(text_json, "vocab_size", 0));
+        hidden_size = static_cast<int>(hf_json_get_int(text_json, "hidden_size", 0));
+        intermediate_size = static_cast<int>(hf_json_get_int(text_json, "intermediate_size", 0));
+        num_hidden_layers = static_cast<int>(hf_json_get_int(text_json, "num_hidden_layers", 0));
+        num_attention_heads = static_cast<int>(hf_json_get_int(text_json, "num_attention_heads", 0));
+        num_key_value_heads = static_cast<int>(hf_json_get_int(text_json, "num_key_value_heads",
                                                                 num_attention_heads));
-        max_position_embeddings = static_cast<int>(hf_json_get_int(json,
+        max_position_embeddings = static_cast<int>(hf_json_get_int(text_json,
                                                     "max_position_embeddings", 2048));
-        rms_norm_eps = hf_json_get_float(json, "rms_norm_eps", 1e-6);
-        rope_theta = hf_get_rope_theta(json, 10000.0);
-        head_dim = static_cast<int>(hf_json_get_int(json, "head_dim", 0));
-        tie_word_embeddings = hf_json_get_bool(json, "tie_word_embeddings", false);
+        rms_norm_eps = hf_json_get_float(text_json, "rms_norm_eps", 1e-6);
+        rope_theta = hf_get_rope_theta(text_json, 10000.0);
+        head_dim = static_cast<int>(hf_json_get_int(text_json, "head_dim", 0));
+        tie_word_embeddings = hf_json_get_bool(text_json, "tie_word_embeddings",
+                                                hf_json_get_bool(json, "tie_word_embeddings", false));
+        partial_rotary_factor = hf_json_get_float(text_json, "partial_rotary_factor", 1.0);
 
         // Qwen3.5-specific
         linear_key_head_dim = static_cast<int>(
-            hf_json_get_int(json, "linear_key_head_dim", 0));
+            hf_json_get_int(text_json, "linear_key_head_dim", 0));
         linear_value_head_dim = static_cast<int>(
-            hf_json_get_int(json, "linear_value_head_dim", 0));
+            hf_json_get_int(text_json, "linear_value_head_dim", 0));
+        linear_num_key_heads = static_cast<int>(
+            hf_json_get_int(text_json, "linear_num_key_heads", 0));
+        linear_num_value_heads = static_cast<int>(
+            hf_json_get_int(text_json, "linear_num_value_heads", 0));
+        linear_conv_kernel_dim = static_cast<int>(
+            hf_json_get_int(text_json, "linear_conv_kernel_dim", 0));
+
+        // MoE-specific
+        moe_intermediate_size = static_cast<int>(
+            hf_json_get_int(text_json, "moe_intermediate_size", 0));
+        shared_expert_intermediate_size = static_cast<int>(
+            hf_json_get_int(text_json, "shared_expert_intermediate_size", 0));
+        num_experts_per_tok = static_cast<int>(
+            hf_json_get_int(text_json, "num_experts_per_tok", 0));
+        num_experts = static_cast<int>(
+            hf_json_get_int(text_json, "num_experts", 0));
 
         // Parse layer_types array
-        parse_layer_types(json);
+        parse_layer_types(text_json);
 
         // Extract architecture class from "architectures" array
         size_t arch_pos = json.find("\"architectures\"");
@@ -217,6 +260,7 @@ struct HFModelConfig {
     // uses concatenated names (e.g., "qwen35") per the llama.cpp convention.
     std::string get_architecture() const {
         if (model_type == "qwen3_5_text" || model_type == "qwen3_5") return "qwen35";
+        if (model_type == "qwen3_5_moe_text" || model_type == "qwen3_5_moe") return "qwen35moe";
         if (model_type == "qwen3") return "qwen3";
         if (model_type == "qwen2") return "qwen2";
         if (model_type == "qwen2_moe") return "qwen2moe";
@@ -229,6 +273,11 @@ struct HFModelConfig {
     // Check if this is a hybrid model (mix of attention + linear attention)
     bool is_hybrid() const {
         return !layer_types.empty();
+    }
+
+    // Check if this is a MoE model
+    bool is_moe() const {
+        return num_experts > 0;
     }
 
     // Get the layer type for a given layer index
@@ -258,6 +307,35 @@ private:
             layer_types.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
             p = q2 + 1;
         }
+    }
+
+    // Extract nested "text_config" object from VL model config.json
+    // VL models wrap the text model config in: { "text_config": { ... }, "vision_config": {...} }
+    std::string extract_text_config(const std::string& json) {
+        size_t pos = json.find("\"text_config\"");
+        if (pos == std::string::npos) return "";
+        size_t colon = json.find(':', pos + 13);
+        if (colon == std::string::npos) return "";
+        size_t brace = json.find('{', colon);
+        if (brace == std::string::npos) return "";
+
+        // Find matching closing brace
+        int depth = 1;
+        size_t p = brace + 1;
+        while (p < json.size() && depth > 0) {
+            if (json[p] == '{') depth++;
+            else if (json[p] == '}') depth--;
+            else if (json[p] == '"') {
+                p++;
+                while (p < json.size() && json[p] != '"') {
+                    if (json[p] == '\\') p++;
+                    p++;
+                }
+            }
+            p++;
+        }
+        if (depth != 0) return "";
+        return json.substr(brace, p - brace);
     }
 };
 
@@ -295,10 +373,31 @@ static inline std::string hf_to_gguf_tensor_name(const std::string& hf_name) {
         if (rest == "input_layernorm.weight")           return prefix + "attn_norm.weight";
         if (rest == "post_attention_layernorm.weight")   return prefix + "ffn_norm.weight";
 
-        // MLP / FFN
+        // MLP / FFN (dense models)
         if (rest == "mlp.gate_proj.weight") return prefix + "ffn_gate.weight";
         if (rest == "mlp.up_proj.weight")   return prefix + "ffn_up.weight";
         if (rest == "mlp.down_proj.weight") return prefix + "ffn_down.weight";
+
+        // MoE FFN (Qwen3.5-MoE)
+        // Router
+        if (rest == "mlp.gate.weight") return prefix + "ffn_gate_inp.weight";
+        // Merged experts
+        if (rest == "mlp.experts.gate_up_proj") return prefix + "ffn_gate_up_exps.weight";
+        if (rest == "mlp.experts.down_proj")    return prefix + "ffn_down_exps.weight";
+        // Individual experts: mlp.experts.{E}.gate_proj.weight
+        if (rest.find("mlp.experts.") == 0 && rest.find(".gate_proj.weight") != std::string::npos) {
+            return prefix + rest;  // pass through for per-expert weights
+        }
+        if (rest.find("mlp.experts.") == 0 && rest.find(".up_proj.weight") != std::string::npos) {
+            return prefix + rest;
+        }
+        if (rest.find("mlp.experts.") == 0 && rest.find(".down_proj.weight") != std::string::npos) {
+            return prefix + rest;
+        }
+        // Shared expert
+        if (rest == "mlp.shared_expert.gate_proj.weight") return prefix + "ffn_gate_shexp.weight";
+        if (rest == "mlp.shared_expert.up_proj.weight")   return prefix + "ffn_up_shexp.weight";
+        if (rest == "mlp.shared_expert.down_proj.weight") return prefix + "ffn_down_shexp.weight";
 
         // Qwen3.5 GatedDeltaNet (linear attention) layers
         if (rest == "linear_attn.in_proj_qkv.weight") return prefix + "attn_qkv.weight";

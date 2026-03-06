@@ -189,7 +189,9 @@ which are now supported via the dequantize fallback path.
 Any GGUF model with LLaMA-style architecture works, including:
 
 - Deepseek / Deepseek v3.1
-- Qwen / Qwen3 / Qwen3.5 (hybrid architecture with GatedDeltaNet)
+- Qwen / Qwen3
+- **Qwen3.5 Dense** (0.8B, 2B, 4B, 9B, 27B) – hybrid GatedDeltaNet + attention
+- **Qwen3.5 MoE** (35B-A3B, 122B-A10B, 397B-A17B) – hybrid with Mixture of Experts
 - Minimax / Minimax2.5
 - And other LLaMA-compatible models
 

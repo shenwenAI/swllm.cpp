@@ -1751,6 +1751,159 @@ void test_qwen35_config() {
     PASS();
 }
 
+void test_qwen35_moe_config() {
+    TEST(qwen35_moe_config);
+
+    // Test MoE config parsing
+    const char* config_path = "/tmp/test_qwen35moe_config.json";
+    const char* config_json = R"({
+        "architectures": ["Qwen3_5MoeForCausalLM"],
+        "model_type": "qwen3_5_moe_text",
+        "hidden_size": 2048,
+        "num_hidden_layers": 40,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "vocab_size": 248320,
+        "moe_intermediate_size": 512,
+        "shared_expert_intermediate_size": 512,
+        "num_experts_per_tok": 8,
+        "num_experts": 256,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 32,
+        "linear_conv_kernel_dim": 4,
+        "partial_rotary_factor": 0.25,
+        "layer_types": ["linear_attention", "linear_attention", "linear_attention",
+                        "full_attention"]
+    })";
+
+    FILE* f = fopen(config_path, "w");
+    ASSERT_TRUE(f != nullptr);
+    fputs(config_json, f);
+    fclose(f);
+
+    HFModelConfig cfg;
+    ASSERT_TRUE(cfg.load(config_path));
+    ASSERT_EQ(cfg.get_architecture(), std::string("qwen35moe"));
+    ASSERT_TRUE(cfg.is_hybrid());
+    ASSERT_TRUE(cfg.is_moe());
+    ASSERT_EQ(cfg.num_experts, 256);
+    ASSERT_EQ(cfg.num_experts_per_tok, 8);
+    ASSERT_EQ(cfg.moe_intermediate_size, 512);
+    ASSERT_EQ(cfg.shared_expert_intermediate_size, 512);
+    ASSERT_EQ(cfg.linear_num_key_heads, 16);
+    ASSERT_EQ(cfg.linear_num_value_heads, 32);
+    ASSERT_EQ(cfg.linear_conv_kernel_dim, 4);
+    ASSERT_NEAR(cfg.partial_rotary_factor, 0.25, 1e-6);
+
+    // Verify layer types: 3 linear + 1 full attention (pattern for qwen3.5 moe)
+    ASSERT_EQ(static_cast<int>(cfg.layer_types.size()), 4);
+    ASSERT_EQ(cfg.layer_types[0], std::string("linear_attention"));
+    ASSERT_EQ(cfg.layer_types[3], std::string("full_attention"));
+
+    remove(config_path);
+    PASS();
+}
+
+void test_qwen35_vl_nested_config() {
+    TEST(qwen35_vl_nested_config);
+
+    // Test VL model with nested text_config
+    const char* config_path = "/tmp/test_qwen35vl_config.json";
+    const char* config_json = R"({
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "model_type": "qwen3_5",
+        "image_token_id": 248056,
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "hidden_size": 4096,
+            "intermediate_size": 12288,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+            "vocab_size": 248320,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 1000000.0,
+            "partial_rotary_factor": 0.25,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "layer_types": ["full_attention", "linear_attention"]
+        },
+        "vision_config": {
+            "model_type": "qwen3_5",
+            "hidden_size": 1152,
+            "depth": 27
+        }
+    })";
+
+    FILE* f = fopen(config_path, "w");
+    ASSERT_TRUE(f != nullptr);
+    fputs(config_json, f);
+    fclose(f);
+
+    HFModelConfig cfg;
+    ASSERT_TRUE(cfg.load(config_path));
+
+    // VL models have nested text_config - should extract text params
+    ASSERT_EQ(cfg.get_architecture(), std::string("qwen35"));
+    ASSERT_EQ(cfg.hidden_size, 4096);
+    ASSERT_EQ(cfg.num_hidden_layers, 32);
+    ASSERT_EQ(cfg.head_dim, 256);
+    ASSERT_EQ(cfg.vocab_size, 248320);
+    ASSERT_NEAR(cfg.partial_rotary_factor, 0.25, 1e-6);
+    ASSERT_TRUE(cfg.is_hybrid());
+    ASSERT_EQ(static_cast<int>(cfg.layer_types.size()), 2);
+
+    remove(config_path);
+    PASS();
+}
+
+void test_moe_weight_name_mapping() {
+    TEST(moe_weight_name_mapping);
+
+    // MoE router
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.mlp.gate.weight"),
+              std::string("blk.0.ffn_gate_inp.weight"));
+
+    // MoE merged experts
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.mlp.experts.gate_up_proj"),
+              std::string("blk.0.ffn_gate_up_exps.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.mlp.experts.down_proj"),
+              std::string("blk.0.ffn_down_exps.weight"));
+
+    // Shared expert
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.5.mlp.shared_expert.gate_proj.weight"),
+              std::string("blk.5.ffn_gate_shexp.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.5.mlp.shared_expert.up_proj.weight"),
+              std::string("blk.5.ffn_up_shexp.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.5.mlp.shared_expert.down_proj.weight"),
+              std::string("blk.5.ffn_down_shexp.weight"));
+
+    PASS();
+}
+
+void test_partial_rotary_factor() {
+    TEST(partial_rotary_factor);
+
+    // Qwen3.5 uses partial_rotary_factor=0.25 with head_dim=256
+    // So only 64 dims get RoPE (32 freqs)
+    ModelConfig cfg;
+    cfg.head_dim = 256;
+    cfg.partial_rotary_factor = 0.25f;
+    cfg.rope_dim = static_cast<int>(cfg.head_dim * cfg.partial_rotary_factor);
+    ASSERT_EQ(cfg.rope_dim, 64);
+
+    // Default (full rotary): partial_rotary_factor=1.0
+    cfg.partial_rotary_factor = 1.0f;
+    cfg.rope_dim = static_cast<int>(cfg.head_dim * cfg.partial_rotary_factor);
+    ASSERT_EQ(cfg.rope_dim, 256);
+
+    PASS();
+}
+
 // ---- Run all tests ----
 
 int main() {
@@ -1827,6 +1980,10 @@ int main() {
     test_hf_weight_name_mapping();
     test_hf_config_parsing();
     test_qwen35_config();
+    test_qwen35_moe_config();
+    test_qwen35_vl_nested_config();
+    test_moe_weight_name_mapping();
+    test_partial_rotary_factor();
 
     fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
             tests_passed, tests_failed);
