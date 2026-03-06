@@ -606,7 +606,12 @@ private:
             weights.layers[l].attn_k_norm = load_tensor(prefix + "attn_k_norm.weight",
                 static_cast<int64_t>(head_dim), true);
 
-            weights.layers[l].ffn_norm = load_tensor(prefix + "ffn_norm.weight", dim);
+            weights.layers[l].ffn_norm = load_tensor(prefix + "ffn_norm.weight", dim, true);
+            // Qwen3.5 GGUF files use "post_attention_norm" instead of "ffn_norm"
+            if (!weights.layers[l].ffn_norm) {
+                weights.layers[l].ffn_norm = load_tensor(
+                    prefix + "post_attention_norm.weight", dim);
+            }
             weights.layers[l].w_gate = load_tensor_raw(prefix + "ffn_gate.weight",
                 static_cast<int64_t>(ffn) * dim);
             weights.layers[l].w_up = load_tensor_raw(prefix + "ffn_up.weight",

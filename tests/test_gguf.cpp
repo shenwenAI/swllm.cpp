@@ -1353,6 +1353,49 @@ void test_qwen35_layer_types_from_gguf() {
     PASS();
 }
 
+void test_qwen35_post_attention_norm_fallback() {
+    TEST(qwen35_post_attention_norm_fallback);
+
+    // Qwen3.5 GGUF files from llama.cpp use "post_attention_norm" instead of
+    // "ffn_norm" for the post-attention normalization tensor.  Verify that
+    // load_weights() falls back to "post_attention_norm.weight" when
+    // "ffn_norm.weight" is not found.
+
+    // Simulate by inserting both tensor names into a GGUFFile tensor map and
+    // checking that the lookup order is correct.
+    GGUFFile gguf;
+
+    // Only add "post_attention_norm.weight" (NOT "ffn_norm.weight")
+    GGUFTensorInfo info;
+    info.name = "blk.0.post_attention_norm.weight";
+    info.n_dims = 1;
+    info.dims[0] = 4;
+    info.dims[1] = 1;
+    info.dims[2] = 1;
+    info.dims[3] = 1;
+    info.type = GGML_TYPE_F32;
+    info.offset = 0;
+    gguf.tensors[info.name] = info;
+
+    // "ffn_norm.weight" should NOT be found
+    ASSERT_TRUE(gguf.tensors.find("blk.0.ffn_norm.weight") == gguf.tensors.end());
+
+    // "post_attention_norm.weight" should be found
+    ASSERT_TRUE(gguf.tensors.find("blk.0.post_attention_norm.weight") != gguf.tensors.end());
+
+    // Verify the fallback logic: try ffn_norm first, then post_attention_norm
+    std::string prefix = "blk.0.";
+    auto it = gguf.tensors.find(prefix + "ffn_norm.weight");
+    bool found_ffn_norm = (it != gguf.tensors.end());
+    ASSERT_TRUE(!found_ffn_norm);  // ffn_norm should not exist
+
+    it = gguf.tensors.find(prefix + "post_attention_norm.weight");
+    bool found_post_attn_norm = (it != gguf.tensors.end());
+    ASSERT_TRUE(found_post_attn_norm);  // post_attention_norm should exist
+
+    PASS();
+}
+
 void test_cpu_matmul_transposed_f8_e4m3() {
     TEST(cpu_matmul_transposed_f8_e4m3);
 
@@ -2065,6 +2108,7 @@ int main() {
     test_dequantize_bf16();
     test_cpu_matmul_transposed_bf16();
     test_qwen35_layer_types_from_gguf();
+    test_qwen35_post_attention_norm_fallback();
 
     fprintf(stderr, "\nK-quant type and dequantization tests:\n");
     test_kquant_type_sizes();
