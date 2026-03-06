@@ -104,10 +104,10 @@ static void print_usage(const char* prog) {
     fprintf(stderr,
         "llm.cpp - Lightweight LLM inference engine\n"
         "\n"
-        "Usage: %s -m <model.gguf> [options] [-p \"prompt\"]\n"
+        "Usage: %s -m <model> [options] [-p \"prompt\"]\n"
         "\n"
         "Required:\n"
-        "  -m, --model <path>       Path to GGUF model file\n"
+        "  -m, --model <path>       Path to GGUF model file or HuggingFace model directory\n"
         "\n"
         "Generation options:\n"
         "  -p, --prompt <text>      Input prompt (default: \"Hello\")\n"
@@ -136,12 +136,17 @@ static void print_usage(const char* prog) {
         "  --info                   Show model info and exit\n"
         "  -h, --help               Show this help\n"
         "\n"
+        "Supported model formats:\n"
+        "  - GGUF files (.gguf) - standard quantized format\n"
+        "  - HuggingFace directories (config.json + *.safetensors) - direct F32/F16/BF16 inference\n"
+        "\n"
         "Examples:\n"
         "  %s -m model.gguf -p \"Once upon a time\"\n"
         "  %s -m model.gguf --gpu -n 512 -p \"Explain quantum computing\"\n"
+        "  %s -m ./Qwen3.5-0.8B/ -p \"Hello\"  # load HuggingFace model directly\n"
         "  %s -m model.gguf -i\n"
         "  %s -m model.gguf --server --port 8080\n",
-        prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog);
 }
 
 static bool parse_args(int argc, char** argv, RunConfig& cfg) {
