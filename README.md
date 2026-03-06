@@ -56,6 +56,18 @@ Or open the folder in Visual Studio (CMake is supported natively) and build from
 
 > **Note:** On Windows the HTTP server links against `ws2_32` automatically. OpenMP can be enabled if your MSVC installation includes it (remove `-DLLM_OPENMP=OFF`).
 
+### Windows (MinGW / g++)
+
+If you use MinGW (g++) instead of MSVC, you must tell CMake to use the **MinGW Makefiles** generator:
+
+```bat
+mkdir build && cd build
+cmake .. -G "MinGW Makefiles"
+cmake --build .
+```
+
+> **Note:** Without `-G "MinGW Makefiles"`, CMake on Windows defaults to the NMake/MSVC generator and will fail with `'nmake' '-?' failed` if Visual Studio is not installed. Make sure `g++` and `mingw32-make` are in your `PATH`.
+
 ### Options
 
 | CMake Option  | Default | Description                  |
