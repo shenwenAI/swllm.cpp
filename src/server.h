@@ -28,6 +28,8 @@
 #else
 #  include <sys/socket.h>
 #  include <netinet/in.h>
+#  include <arpa/inet.h>   // inet_pton, inet_ntop, inet_ntoa
+#  include <sys/time.h>    // struct timeval (SO_RCVTIMEO timeout)
 #  include <unistd.h>
    typedef int socket_t;
 #  define CLOSE_SOCKET(s) close(s)
@@ -585,6 +587,7 @@ pre code{background:transparent;padding:0}
       <input type="text" id="srvurl" value="">
     </div>
     <button class="btn btn-ghost btn-sm" style="width:100%" onclick="clearChat()" data-i18n="clear_chat">&#128465; Clear Chat</button>
+    <a id="dl-btn" class="btn btn-ghost btn-sm" style="width:100%;text-align:center;text-decoration:none;display:block" data-i18n="download_html">&#11015; Download UI</a>
     <div>
       <h3 data-i18n="agent_tools_h">Agent / Tools</h3>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -632,7 +635,8 @@ en:{
   tool_calls_h:'\uD83D\uDD27 Tool Calls \u2014 confirm before execution',
   allow:'\u2713 Allow',deny:'\u2717 Deny',denied:'Denied',
   tool_not_impl:'Tool not implemented in demo.',
-  file_prefix:'File: ',img_suffix:' image(s)'
+  file_prefix:'File: ',img_suffix:' image(s)',
+  download_html:'\u2B07 Download UI'
 },
 zh:{
   title:'llm.cpp \u804A\u5929',subtitle:'\u8F7B\u91CF\u7EA7 LLM \u63A8\u7406\u5F15\u64CE',
@@ -652,7 +656,8 @@ zh:{
   tool_calls_h:'\uD83D\uDD27 \u5DE5\u5177\u8C03\u7528 \u2014 \u6267\u884C\u524D\u8BF7\u786E\u8BA4',
   allow:'\u2713 \u5141\u8BB8',deny:'\u2717 \u62D2\u7EDD',denied:'\u5DF2\u62D2\u7EDD',
   tool_not_impl:'\u6F14\u793A\u4E2D\u672A\u5B9E\u73B0\u6B64\u5DE5\u5177\u3002',
-  file_prefix:'\u6587\u4EF6\uFF1A',img_suffix:' \u5F20\u56FE\u7247'
+  file_prefix:'\u6587\u4EF6\uFF1A',img_suffix:' \u5F20\u56FE\u7247',
+  download_html:'\u2B07 \u4E0B\u8F7D\u754C\u9762'
 },
 ja:{
   title:'llm.cpp \u30C1\u30E3\u30C3\u30C8',
@@ -675,7 +680,8 @@ ja:{
   tool_calls_h:'\uD83D\uDD27 \u30C4\u30FC\u30EB\u547C\u3073\u51FA\u3057 \u2014 \u5B9F\u884C\u524D\u306B\u78BA\u8A8D',
   allow:'\u2713 \u8A31\u53EF',deny:'\u2717 \u62D2\u5426',denied:'\u62D2\u5426\u3055\u308C\u307E\u3057\u305F',
   tool_not_impl:'\u3053\u306E\u30C4\u30FC\u30EB\u306F\u30C7\u30E2\u3067\u306F\u672A\u5B9F\u88C5\u3067\u3059\u3002',
-  file_prefix:'\u30D5\u30A1\u30A4\u30EB\uFF1A',img_suffix:' \u679A\u306E\u753B\u50CF'
+  file_prefix:'\u30D5\u30A1\u30A4\u30EB\uFF1A',img_suffix:' \u679A\u306E\u753B\u50CF',
+  download_html:'\u2B07 UI\u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9'
 }
 };
 var curLang=localStorage.getItem('llmcpp_lang')||'en';
@@ -695,6 +701,8 @@ var BASE=(window.location.protocol==='http:'||window.location.protocol==='https:
   ?window.location.origin:'http://localhost:8080';
 var srvEl=document.getElementById('srvurl');
 srvEl.value=BASE;srvEl.placeholder='http://localhost:8080';
+// Wire up the download button to /app.html on the server
+(function(){var dl=document.getElementById('dl-btn');if(dl)dl.href=(BASE||'http://localhost:8080')+'/app.html';})();
 var history=[];
 var imgs=[];
 var attachedFiles=[];
@@ -931,6 +939,396 @@ applyLang();
 )HTML";
 }
 
+// ---- UPnP IGD port mapping (SSDP + SOAP, no external dependencies) ----
+//
+// Discovers the Internet Gateway Device (router) on the local network via
+// SSDP multicast, parses the description XML, and adds a TCP port mapping so
+// that the llm.cpp server is reachable from the internet.
+
+// --- XML helpers ---
+
+// Return the text content of the first <tag>…</tag> occurrence.
+static std::string xml_text(const std::string& xml, const std::string& tag) {
+    std::string open = "<" + tag + ">";
+    size_t s = xml.find(open);
+    if (s == std::string::npos) {
+        // Try <tag attr=…> form
+        size_t ts = xml.find("<" + tag + " ");
+        if (ts == std::string::npos) return "";
+        size_t te = xml.find('>', ts);
+        if (te == std::string::npos) return "";
+        s = te + 1;
+    } else {
+        s += open.size();
+    }
+    size_t e = xml.find("</" + tag + ">", s);
+    if (e == std::string::npos) return "";
+    std::string v = xml.substr(s, e - s);
+    size_t a = v.find_first_not_of(" \t\r\n");
+    size_t b = v.find_last_not_of(" \t\r\n");
+    return (a == std::string::npos) ? "" : v.substr(a, b - a + 1);
+}
+
+// Return the first <tag>…</tag> block that contains needle.
+static std::string xml_block_with(const std::string& xml, const std::string& tag,
+                                   const std::string& needle) {
+    std::string ot = "<" + tag, ct = "</" + tag + ">";
+    size_t pos = 0;
+    while (pos < xml.size()) {
+        size_t bs = xml.find(ot, pos);
+        if (bs == std::string::npos) break;
+        size_t te = xml.find('>', bs);
+        if (te == std::string::npos) break;
+        size_t be = xml.find(ct, te);
+        if (be == std::string::npos) break;
+        be += ct.size();
+        if (xml.find(needle, te) < be) return xml.substr(bs, be - bs);
+        pos = be;
+    }
+    return "";
+}
+
+// --- URL / socket helpers ---
+
+static bool upnp_parse_url(const std::string& url,
+                            std::string& host, int& port, std::string& path) {
+    size_t sch = url.find("://");
+    if (sch == std::string::npos) return false;
+    std::string rest = url.substr(sch + 3);
+    size_t pp = rest.find('/');
+    std::string hp = (pp == std::string::npos) ? rest : rest.substr(0, pp);
+    path = (pp == std::string::npos) ? "/" : rest.substr(pp);
+    size_t cp = hp.rfind(':');
+    if (cp == std::string::npos) { host = hp; port = 80; }
+    else {
+        host = hp.substr(0, cp);
+        std::string ps = hp.substr(cp + 1);
+        // Validate port string contains only digits
+        for (char c : ps) { if (c < '0' || c > '9') { return false; } }
+        port = ps.empty() ? 80 : atoi(ps.c_str());
+    }
+    return !host.empty() && port > 0;
+}
+
+// Apply receive/send timeouts (seconds) to a socket.
+static void upnp_set_timeout(socket_t fd, int secs) {
+#ifdef _WIN32
+    DWORD ms = static_cast<DWORD>(secs * 1000);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&ms), sizeof(ms));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&ms), sizeof(ms));
+#else
+    struct timeval tv; tv.tv_sec = secs; tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+// Connect a TCP socket to host:port (IPv4 numeric address).
+static socket_t upnp_connect(const std::string& host, int port, int timeout_secs = 5) {
+    socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == SOCK_INVALID) return SOCK_INVALID;
+    upnp_set_timeout(fd, timeout_secs);
+    struct sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons(static_cast<uint16_t>(port));
+#ifdef _WIN32
+    sa.sin_addr.s_addr = inet_addr(host.c_str());
+    if (sa.sin_addr.s_addr == INADDR_NONE) { CLOSE_SOCKET(fd); return SOCK_INVALID; }
+#else
+    if (inet_pton(AF_INET, host.c_str(), &sa.sin_addr) <= 0) {
+        CLOSE_SOCKET(fd); return SOCK_INVALID;
+    }
+#endif
+    if (connect(fd, reinterpret_cast<struct sockaddr*>(&sa), sizeof(sa)) != 0) {
+        CLOSE_SOCKET(fd); return SOCK_INVALID;
+    }
+    return fd;
+}
+
+// Send all bytes of buf via fd.
+static void upnp_send_all(socket_t fd, const std::string& buf) {
+    size_t sent = 0;
+    while (sent < buf.size()) {
+#ifdef _WIN32
+        int n = send(fd, buf.c_str() + sent, static_cast<int>(buf.size() - sent), 0);
+#else
+        ssize_t n = send(fd, buf.c_str() + sent, buf.size() - sent, 0);
+#endif
+        if (n <= 0) break;
+        sent += static_cast<size_t>(n);
+    }
+}
+
+// Receive until connection closes; returns full response.
+static std::string upnp_recv_all(socket_t fd) {
+    std::string resp; char buf[4096];
+    while (true) {
+#ifdef _WIN32
+        int n = recv(fd, buf, sizeof(buf), 0);
+#else
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+#endif
+        if (n <= 0) break;
+        resp.append(buf, static_cast<size_t>(n));
+    }
+    return resp;
+}
+
+// HTTP GET – returns response body on HTTP 200, "" otherwise.
+static std::string upnp_http_get(const std::string& url) {
+    std::string host; int port; std::string path;
+    if (!upnp_parse_url(url, host, port, path)) return "";
+    socket_t fd = upnp_connect(host, port, 5);
+    if (fd == SOCK_INVALID) return "";
+    std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host + ":" +
+                      std::to_string(port) + "\r\nConnection: close\r\n\r\n";
+    upnp_send_all(fd, req);
+    std::string raw = upnp_recv_all(fd);
+    CLOSE_SOCKET(fd);
+    // Check HTTP status 200
+    if (raw.size() < 12 || raw.substr(9, 3) != "200") return "";
+    size_t he = raw.find("\r\n\r\n");
+    return (he == std::string::npos) ? "" : raw.substr(he + 4);
+}
+
+// SOAP HTTP POST – returns (true, response_body) on HTTP 2xx.
+static bool upnp_soap_call(const std::string& host, int port, const std::string& path,
+                            const std::string& service_type,
+                            const std::string& action_name,
+                            const std::string& action_body,
+                            std::string* out_body = nullptr) {
+    std::string envelope =
+        "<?xml version=\"1.0\"?>"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\""
+        " s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+        "<s:Body><u:" + action_name + " xmlns:u=\"" + service_type + "\">"
+        + action_body +
+        "</u:" + action_name + "></s:Body></s:Envelope>";
+    std::string soap_action = "\"" + service_type + "#" + action_name + "\"";
+    std::string req =
+        "POST " + path + " HTTP/1.0\r\n"
+        "Host: " + host + ":" + std::to_string(port) + "\r\n"
+        "Content-Type: text/xml; charset=\"utf-8\"\r\n"
+        "SOAPAction: " + soap_action + "\r\n"
+        "Content-Length: " + std::to_string(envelope.size()) + "\r\n"
+        "Connection: close\r\n\r\n" + envelope;
+    socket_t fd = upnp_connect(host, port, 10);
+    if (fd == SOCK_INVALID) return false;
+    upnp_send_all(fd, req);
+    std::string raw = upnp_recv_all(fd);
+    CLOSE_SOCKET(fd);
+    if (raw.size() < 12) return false;
+    // "HTTP/1.x NNN …" – validate the 3-digit status field
+    bool digits_ok = true;
+    for (size_t i = 9; i < 12 && i < raw.size(); i++)
+        if (raw[i] < '0' || raw[i] > '9') { digits_ok = false; break; }
+    int status = digits_ok ? atoi(raw.c_str() + 9) : 0;
+    size_t he  = raw.find("\r\n\r\n");
+    if (out_body && he != std::string::npos) *out_body = raw.substr(he + 4);
+    return status >= 200 && status < 300;
+}
+
+// --- SSDP discovery ---
+
+// Send SSDP M-SEARCH; returns the LOCATION URL of the first IGD found.
+static std::string upnp_ssdp_discover(int timeout_secs = 3) {
+#ifdef _WIN32
+    socket_t fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#else
+    socket_t fd = socket(AF_INET, SOCK_DGRAM, 0);
+#endif
+    if (fd == SOCK_INVALID) return "";
+    upnp_set_timeout(fd, timeout_secs);
+    int one = 1;
+#ifdef _WIN32
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
+#else
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#endif
+    struct sockaddr_in local{};
+    local.sin_family = AF_INET; local.sin_addr.s_addr = INADDR_ANY; local.sin_port = 0;
+    bind(fd, reinterpret_cast<struct sockaddr*>(&local), sizeof(local));
+
+    struct sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_port   = htons(1900);
+#ifdef _WIN32
+    dest.sin_addr.s_addr = inet_addr("239.255.255.250");
+#else
+    inet_pton(AF_INET, "239.255.255.250", &dest.sin_addr);
+#endif
+    const char* msearch =
+        "M-SEARCH * HTTP/1.1\r\n"
+        "HOST: 239.255.255.250:1900\r\n"
+        "MAN: \"ssdp:discover\"\r\n"
+        "MX: 3\r\n"
+        "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n"
+        "\r\n";
+#ifdef _WIN32
+    sendto(fd, msearch, static_cast<int>(strlen(msearch)), 0,
+           reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+#else
+    sendto(fd, msearch, strlen(msearch), 0,
+           reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+#endif
+    std::string location;
+    char buf[2048] = {};
+    for (int i = 0; i < 16 && location.empty(); i++) {
+#ifdef _WIN32
+        int n = recv(fd, buf, static_cast<int>(sizeof(buf) - 1), 0);
+#else
+        ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+#endif
+        if (n <= 0) break;
+        buf[n] = '\0';
+        // Case-insensitive scan for "location:" header (use str_to_lower helper)
+        std::string resp(buf, static_cast<size_t>(n));
+        std::string lo = str_to_lower(resp);
+        size_t lp = lo.find("location:");
+        if (lp != std::string::npos) {
+            lp += 9;
+            while (lp < resp.size() && (resp[lp]==' '||resp[lp]=='\t')) lp++;
+            size_t le = resp.find("\r\n", lp);
+            if (le == std::string::npos) le = resp.size();
+            location = resp.substr(lp, le - lp);
+            while (!location.empty() &&
+                   (location.back()==' '||location.back()=='\r'||location.back()=='\n'))
+                location.pop_back();
+        }
+    }
+    CLOSE_SOCKET(fd);
+    return location;
+}
+
+// --- IGD info ---
+
+struct UpnpIgdInfo {
+    std::string host;
+    int         port = 0;
+    std::string control_path;
+    std::string service_type;
+    bool        valid = false;
+};
+
+// Discover IGD and return control URL info.
+static UpnpIgdInfo upnp_discover_igd(int timeout_secs = 3) {
+    UpnpIgdInfo info;
+    std::string location = upnp_ssdp_discover(timeout_secs);
+    if (location.empty()) return info;
+
+    std::string desc = upnp_http_get(location);
+    if (desc.empty()) return info;
+
+    // Try WANIPConnection and WANPPPConnection, both v1 and v2
+    static const char* svc[] = {
+        "WANIPConnection:1", "WANIPConnection:2",
+        "WANPPPConnection:1", nullptr
+    };
+    std::string svc_block;
+    for (int i = 0; svc[i]; i++) {
+        svc_block = xml_block_with(desc, "service", svc[i]);
+        if (!svc_block.empty()) {
+            info.service_type = "urn:schemas-upnp-org:service:" + std::string(svc[i]);
+            break;
+        }
+    }
+    if (svc_block.empty()) return info;
+
+    std::string ctrl = xml_text(svc_block, "controlURL");
+    if (ctrl.empty()) return info;
+
+    // Resolve ctrl relative to the base URL
+    std::string bhost; int bport; std::string bpath;
+    if (!upnp_parse_url(location, bhost, bport, bpath)) return info;
+    if (ctrl[0] != '/') {
+        size_t sl = bpath.rfind('/');
+        ctrl = (sl == std::string::npos ? "/" : bpath.substr(0, sl + 1)) + ctrl;
+    }
+    info.host = bhost; info.port = bport; info.control_path = ctrl;
+    info.valid = true;
+    return info;
+}
+
+// Get the local IPv4 address used when connecting to the gateway.
+static std::string upnp_local_ip(const std::string& gateway_host, int gateway_port) {
+    socket_t fd = upnp_connect(gateway_host, gateway_port, 3);
+    if (fd == SOCK_INVALID) return "";
+    struct sockaddr_in local{};
+#ifdef _WIN32
+    int len = sizeof(local);
+#else
+    socklen_t len = sizeof(local);
+#endif
+    getsockname(fd, reinterpret_cast<struct sockaddr*>(&local), &len);
+    CLOSE_SOCKET(fd);
+#ifdef _WIN32
+    const char* ip = inet_ntoa(local.sin_addr);
+    return ip ? std::string(ip) : "";
+#else
+    char buf[64] = {};
+    inet_ntop(AF_INET, &local.sin_addr, buf, sizeof(buf));
+    return std::string(buf);
+#endif
+}
+
+// Attempt UPnP IGD TCP port mapping.  Logs to stderr.  Returns true on success.
+static bool upnp_map_port(int port) {
+    fprintf(stderr, "UPnP: discovering IGD...\n");
+    UpnpIgdInfo igd = upnp_discover_igd(3);
+    if (!igd.valid) {
+        fprintf(stderr, "UPnP: no IGD found (router may not support UPnP IGD)\n");
+        return false;
+    }
+    fprintf(stderr, "UPnP: IGD at %s:%d%s  [%s]\n",
+            igd.host.c_str(), igd.port, igd.control_path.c_str(),
+            igd.service_type.c_str());
+
+    std::string local_ip = upnp_local_ip(igd.host, igd.port);
+    if (local_ip.empty() || local_ip == "0.0.0.0") {
+        fprintf(stderr, "UPnP: could not determine local IP\n");
+        return false;
+    }
+    fprintf(stderr, "UPnP: local IP: %s\n", local_ip.c_str());
+
+    // GetExternalIPAddress (optional, for display only)
+    std::string ext_body;
+    upnp_soap_call(igd.host, igd.port, igd.control_path,
+                   igd.service_type, "GetExternalIPAddress", "", &ext_body);
+    std::string ext_ip = xml_text(ext_body, "NewExternalIPAddress");
+    if (!ext_ip.empty()) fprintf(stderr, "UPnP: external IP: %s\n", ext_ip.c_str());
+
+    // AddPortMapping
+    std::string ps = std::to_string(port);
+    std::string soap_body =
+        "<NewRemoteHost></NewRemoteHost>"
+        "<NewExternalPort>" + ps + "</NewExternalPort>"
+        "<NewProtocol>TCP</NewProtocol>"
+        "<NewInternalPort>" + ps + "</NewInternalPort>"
+        "<NewInternalClient>" + local_ip + "</NewInternalClient>"
+        "<NewEnabled>1</NewEnabled>"
+        "<NewPortMappingDescription>llm.cpp</NewPortMappingDescription>"
+        // Lease duration 0 = indefinite (router keeps mapping until reboot or explicit deletion)
+        "<NewLeaseDuration>0</NewLeaseDuration>";
+    std::string resp_body;
+    bool ok = upnp_soap_call(igd.host, igd.port, igd.control_path,
+                              igd.service_type, "AddPortMapping", soap_body, &resp_body);
+    if (!ok || resp_body.find("UPnPError") != std::string::npos ||
+               resp_body.find("Fault")     != std::string::npos) {
+        std::string code = xml_text(resp_body, "errorCode");
+        std::string desc = xml_text(resp_body, "errorDescription");
+        fprintf(stderr, "UPnP: AddPortMapping failed%s%s\n",
+                code.empty() ? "" : (" (code=" + code + " " + desc + ")").c_str(),
+                !ok ? " (no HTTP 200)" : "");
+        return false;
+    }
+    if (!ext_ip.empty())
+        fprintf(stderr, "UPnP: mapped! External access: http://%s:%d/\n",
+                ext_ip.c_str(), port);
+    else
+        fprintf(stderr, "UPnP: port %d mapped successfully\n", port);
+    return true;
+}
+
 // ---- Server struct ----
 
 struct ServerConfig {
@@ -939,6 +1337,7 @@ struct ServerConfig {
     std::string system_prompt = "You are a helpful assistant.";
     std::string api_key;        // if non-empty, require "Authorization: Bearer <api_key>"
     std::string model_name = "llm.cpp";  // ID returned by /v1/models
+    bool upnp = false;          // attempt UPnP IGD port mapping on startup
 };
 
 // Build a ChatML-format prompt from a messages array.
@@ -1071,6 +1470,34 @@ static void handle_client(socket_t client_fd, Model& model, Sampler& sampler,
     if (method == "GET" && (path == "/" || path == "/index.html")) {
         std::string html = get_web_ui_html(cfg.port);
         http_send(client_fd, "200 OK", "text/html; charset=utf-8", html);
+        CLOSE_SOCKET(client_fd);
+        return;
+    }
+
+    // ---- GET /app.html – download standalone single-file chat UI ----
+    if (method == "GET" && path == "/app.html") {
+        std::string html = get_web_ui_html(cfg.port);
+        // Send with Content-Disposition so browsers save it as a file
+        std::string resp_hdr =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            "Content-Disposition: attachment; filename=\"llm-chat.html\"\r\n"
+            "Content-Length: " + std::to_string(html.size()) + "\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Connection: close\r\n"
+            "\r\n" + html;
+        size_t sent = 0;
+        while (sent < resp_hdr.size()) {
+#ifdef _WIN32
+            int n = send(client_fd, resp_hdr.c_str() + sent,
+                         static_cast<int>(resp_hdr.size() - sent), 0);
+#else
+            ssize_t n = send(client_fd, resp_hdr.c_str() + sent,
+                             resp_hdr.size() - sent, 0);
+#endif
+            if (n <= 0) break;
+            sent += static_cast<size_t>(n);
+        }
         CLOSE_SOCKET(client_fd);
         return;
     }
@@ -1292,6 +1719,8 @@ static void run_server(Model& model, Sampler& sampler, const ServerConfig& cfg) 
 
     fprintf(stderr, "Server listening on http://0.0.0.0:%d\n", cfg.port);
     fprintf(stderr, "Web chat UI:      http://localhost:%d/\n", cfg.port);
+    fprintf(stderr, "Standalone HTML:  http://localhost:%d/app.html  (save & open offline)\n",
+            cfg.port);
     fprintf(stderr, "OpenAI-compatible endpoints:\n");
     fprintf(stderr, "  GET  http://localhost:%d/v1/models\n", cfg.port);
     fprintf(stderr, "  POST http://localhost:%d/v1/chat/completions\n", cfg.port);
@@ -1299,6 +1728,12 @@ static void run_server(Model& model, Sampler& sampler, const ServerConfig& cfg) 
         fprintf(stderr, "API key:          enabled (set in --api-key)\n");
     fprintf(stderr, "Connect OpenWebUI via base URL: http://localhost:%d/v1\n\n",
             cfg.port);
+
+    // UPnP port mapping (non-blocking: runs before accept loop)
+    if (cfg.upnp) {
+        upnp_map_port(cfg.port);
+        fprintf(stderr, "\n");
+    }
 
     while (true) {
         socket_t client = accept(server_fd, nullptr, nullptr);
