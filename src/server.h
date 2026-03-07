@@ -470,14 +470,15 @@ json_parse_messages_multimodal(const std::string& json) {
 // ---- HTML web UI ----
 
 // Returns the self-contained HTML chat interface.
+// Supports i18n (English / Chinese / Japanese) and text file upload.
 static std::string get_web_ui_html(int port) {
     (void)port;
     return R"HTML(<!DOCTYPE html>
-<html lang="en">
+<html lang="en" id="html-root">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>llm.cpp Chat</title>
+<title id="page-title">llm.cpp Chat</title>
 <style>
 :root{--bg:#0d1117;--surface:#161b22;--card:#21262d;--accent:#58a6ff;--danger:#f85149;--ok:#3fb950;--text:#e6edf3;--dim:#8b949e;--border:#30363d;--user:#1f3a5f;--radius:10px}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -521,10 +522,15 @@ pre code{background:transparent;padding:0}
 .tool-item .args{color:var(--dim);font-family:monospace;margin-top:3px;white-space:pre-wrap}
 .tool-actions{display:flex;gap:6px;margin-top:7px}
 .input-area{border-top:1px solid var(--border);padding:12px 16px}
-.img-preview{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.img-preview{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
 .img-thumb{position:relative}
 .img-thumb img{width:54px;height:54px;object-fit:cover;border-radius:6px;display:block}
 .img-thumb .rm{position:absolute;top:-5px;right:-5px;background:var(--danger);color:#fff;border:none;width:17px;height:17px;border-radius:50%;cursor:pointer;font-size:.65rem;display:flex;align-items:center;justify-content:center;line-height:1}
+.file-preview{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.file-chip{display:flex;align-items:center;gap:5px;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:.78rem;max-width:220px}
+.file-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent)}
+.file-chip .rm{background:transparent;color:var(--dim);border:none;cursor:pointer;font-size:.9rem;padding:0 0 0 4px;line-height:1;flex-shrink:0}
+.file-chip .rm:hover{color:var(--danger)}
 .input-row{display:flex;gap:8px;align-items:flex-end}
 .input-row textarea{flex:1;background:var(--card);border:1px solid var(--border);color:var(--text);padding:9px 13px;border-radius:var(--radius);font-size:.88rem;resize:none;max-height:140px;overflow-y:auto;font-family:inherit;outline:none}
 .input-row textarea:focus{border-color:var(--accent)}
@@ -544,92 +550,175 @@ pre code{background:transparent;padding:0}
 </head>
 <body>
 <div class="sidebar">
-  <div class="logo"><h1>llm.cpp</h1><p>Lightweight LLM inference</p></div>
+  <div class="logo"><h1>llm.cpp</h1><p data-i18n="subtitle">Lightweight LLM inference</p></div>
   <div class="settings">
     <div>
-      <h3>System Prompt</h3>
+      <h3 data-i18n="language">Language</h3>
+      <select id="lang" onchange="setLang(this.value)">
+        <option value="en">English</option>
+        <option value="zh">&#20013;&#25991;</option>
+        <option value="ja">&#26085;&#26412;&#35486;</option>
+      </select>
+    </div>
+    <div>
+      <h3 data-i18n="sys_prompt_h">System Prompt</h3>
       <textarea id="sys" rows="3">You are a helpful assistant.</textarea>
     </div>
     <div>
-      <label>Temperature <span class="rv" id="tv">0.8</span></label>
+      <label><span data-i18n="temperature">Temperature</span> <span class="rv" id="tv">0.8</span></label>
       <input type="range" id="temp" min="0" max="2" step="0.05" value="0.8" oninput="document.getElementById('tv').textContent=this.value">
     </div>
     <div>
-      <label>Max Tokens</label>
+      <label data-i18n="max_tokens">Max Tokens</label>
       <input type="number" id="maxt" value="512" min="1" max="8192">
     </div>
     <div>
-      <label>Top-P <span class="rv" id="ppv">0.9</span></label>
+      <label><span data-i18n="top_p">Top-P</span> <span class="rv" id="ppv">0.9</span></label>
       <input type="range" id="topp" min="0" max="1" step="0.01" value="0.9" oninput="document.getElementById('ppv').textContent=this.value">
     </div>
     <div>
-      <label>API Key (Bearer token)</label>
-      <input type="password" id="apikey" placeholder="Leave blank if not set">
+      <label data-i18n="api_key_label">API Key (Bearer token)</label>
+      <input type="password" id="apikey" data-i18n-ph="api_key_ph">
     </div>
     <div>
-      <label>Server URL</label>
+      <label data-i18n="server_url">Server URL</label>
       <input type="text" id="srvurl" value="">
     </div>
-    <button class="btn btn-ghost btn-sm" style="width:100%" onclick="clearChat()">🗑 Clear Chat</button>
+    <button class="btn btn-ghost btn-sm" style="width:100%" onclick="clearChat()" data-i18n="clear_chat">&#128465; Clear Chat</button>
     <div>
-      <h3>Agent / Tools</h3>
+      <h3 data-i18n="agent_tools_h">Agent / Tools</h3>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-        <input type="checkbox" id="agent"> Enable tool calling
+        <input type="checkbox" id="agent"> <span data-i18n="enable_tool">Enable tool calling</span>
       </label>
-      <div style="font-size:.75rem;color:var(--dim);margin-top:6px">Built-in demo tools: calculator, get_datetime</div>
+      <div style="font-size:.75rem;color:var(--dim);margin-top:6px" data-i18n="tool_demo">Built-in demo tools: calculator, get_datetime</div>
     </div>
   </div>
 </div>
 <div class="main">
   <div class="messages" id="msgs">
     <div class="msg assistant">
-      <div class="avatar">🤖</div>
-      <div class="bubble">Hello! I&#39;m powered by <strong>llm.cpp</strong>. How can I help you today?</div>
+      <div class="avatar">&#129302;</div>
+      <div class="bubble" id="greeting-bubble">Hello! I&#39;m powered by <strong>llm.cpp</strong>. How can I help you today?</div>
     </div>
   </div>
   <div class="input-area">
     <div class="img-preview" id="imgprev"></div>
+    <div class="file-preview" id="fileprev"></div>
     <div class="input-row">
-      <label class="ic-btn" title="Attach image" style="cursor:pointer">
-        📎<input type="file" id="imgfile" accept="image/*" style="display:none" onchange="attachImg(this)">
+      <label class="ic-btn" data-i18n-title="attach_img" title="Attach image" style="cursor:pointer">
+        &#128206;<input type="file" id="imgfile" accept="image/*" style="display:none" onchange="attachImg(this)">
       </label>
-      <textarea id="inp" rows="1" placeholder="Message… (Enter to send, Shift+Enter for newline)"
+      <label class="ic-btn" data-i18n-title="attach_file" title="Attach file" style="cursor:pointer">
+        &#128196;<input type="file" id="txtfile" accept=".txt,.md,.csv,.json,.xml,.py,.js,.ts,.cpp,.h,.c,.java,.go,.rs,.rb,.sh,.yaml,.yml,.toml,.ini,.log,.rst,.tex" style="display:none" onchange="attachFile(this)">
+      </label>
+      <textarea id="inp" rows="1" data-i18n-ph="msg_ph" placeholder="Message&#8230; (Enter to send, Shift+Enter for newline)"
         onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send();}autoH(this)"></textarea>
-      <button class="ic-btn send-btn" id="sendbtn" onclick="send()" title="Send">➤</button>
+      <button class="ic-btn send-btn" id="sendbtn" onclick="send()" title="Send">&#10148;</button>
     </div>
   </div>
-</div>
 <script>
-// Default server URL – use current origin when running from the server,
-// fall back to localhost:8080 when served from a file or different origin.
+// ---- i18n translations ----
+var LANG={
+en:{
+  title:'llm.cpp Chat',subtitle:'Lightweight LLM inference',language:'Language',
+  sys_prompt_h:'System Prompt',temperature:'Temperature',max_tokens:'Max Tokens',
+  top_p:'Top-P',api_key_label:'API Key (Bearer token)',api_key_ph:'Leave blank if not set',
+  server_url:'Server URL',clear_chat:'\uD83D\uDDD1 Clear Chat',
+  agent_tools_h:'Agent / Tools',enable_tool:'Enable tool calling',
+  tool_demo:'Built-in demo tools: calculator, get_datetime',
+  greeting:'Hello! I\'m powered by <strong>llm.cpp</strong>. How can I help you today?',
+  msg_ph:'Message\u2026 (Enter to send, Shift+Enter for newline)',
+  chat_cleared:'Chat cleared.',attach_img:'Attach image',attach_file:'Attach file',
+  tool_calls_h:'\uD83D\uDD27 Tool Calls \u2014 confirm before execution',
+  allow:'\u2713 Allow',deny:'\u2717 Deny',denied:'Denied',
+  tool_not_impl:'Tool not implemented in demo.',
+  file_prefix:'File: ',img_suffix:' image(s)'
+},
+zh:{
+  title:'llm.cpp \u804A\u5929',subtitle:'\u8F7B\u91CF\u7EA7 LLM \u63A8\u7406\u5F15\u64CE',
+  language:'\u8BED\u8A00',
+  sys_prompt_h:'\u7CFB\u7EDF\u63D0\u793A\u8BCD',temperature:'\u6E29\u5EA6',
+  max_tokens:'\u6700\u5927\u4EE4\u724C\u6570',top_p:'Top-P',
+  api_key_label:'API \u5BC6\u9470\uFF08Bearer \u4EE4\u724C\uFF09',
+  api_key_ph:'\u672A\u8BBE\u7F6E\u5219\u7559\u7A7A',
+  server_url:'\u670D\u52A1\u5668\u5730\u5740',
+  clear_chat:'\uD83D\uDDD1 \u6E05\u9664\u5BF9\u8BDD',
+  agent_tools_h:'\u4EE3\u7406 / \u5DE5\u5177',enable_tool:'\u542F\u7528\u5DE5\u5177\u8C03\u7528',
+  tool_demo:'\u5185\u7F6E\u6F14\u793A\u5DE5\u5177\uFF1A\u8BA1\u7B97\u5668\u3001\u83B7\u53D6\u65E5\u671F\u65F6\u95F4',
+  greeting:'\u4F60\u597D\uFF01\u6211\u7531 <strong>llm.cpp</strong> \u9A71\u52A8\uFF0C\u6709\u4EC0\u4E48\u53EF\u4EE5\u5E2E\u52A9\u4F60\u7684\uFF1F',
+  msg_ph:'\u8F93\u5165\u6D88\u606F\u2026\uFF08Enter \u53D1\u9001\uFF0CShift+Enter \u6362\u884C\uFF09',
+  chat_cleared:'\u5BF9\u8BDD\u5DF2\u6E05\u9664\u3002',
+  attach_img:'\u9644\u52A0\u56FE\u7247',attach_file:'\u9644\u52A0\u6587\u4EF6',
+  tool_calls_h:'\uD83D\uDD27 \u5DE5\u5177\u8C03\u7528 \u2014 \u6267\u884C\u524D\u8BF7\u786E\u8BA4',
+  allow:'\u2713 \u5141\u8BB8',deny:'\u2717 \u62D2\u7EDD',denied:'\u5DF2\u62D2\u7EDD',
+  tool_not_impl:'\u6F14\u793A\u4E2D\u672A\u5B9E\u73B0\u6B64\u5DE5\u5177\u3002',
+  file_prefix:'\u6587\u4EF6\uFF1A',img_suffix:' \u5F20\u56FE\u7247'
+},
+ja:{
+  title:'llm.cpp \u30C1\u30E3\u30C3\u30C8',
+  subtitle:'\u8EFD\u91CF LLM \u63A8\u8AD6\u30A8\u30F3\u30B8\u30F3',
+  language:'\u8A00\u8A9E',
+  sys_prompt_h:'\u30B7\u30B9\u30C6\u30E0\u30D7\u30ED\u30F3\u30D7\u30C8',
+  temperature:'\u6E29\u5EA6',max_tokens:'\u6700\u5927\u30C8\u30FC\u30AF\u30F3\u6570',
+  top_p:'Top-P',
+  api_key_label:'API\u30AD\u30FC\uFF08Bearer\u30C8\u30FC\u30AF\u30F3\uFF09',
+  api_key_ph:'\u672A\u8A2D\u5B9A\u306E\u5834\u5408\u306F\u7A7A\u767D',
+  server_url:'\u30B5\u30FC\u30D0\u30FCURL',
+  clear_chat:'\uD83D\uDDD1 \u30C1\u30E3\u30C3\u30C8\u3092\u30AF\u30EA\u30A2',
+  agent_tools_h:'\u30A8\u30FC\u30B8\u30A7\u30F3\u30C8 / \u30C4\u30FC\u30EB',
+  enable_tool:'\u30C4\u30FC\u30EB\u547C\u3073\u51FA\u3057\u3092\u6709\u52B9\u5316',
+  tool_demo:'\u5185\u8535\u30C7\u30E2\u30C4\u30FC\u30EB\uFF1A\u8A08\u7B97\u6A5F\u3001\u65E5\u6642\u53D6\u5F97',
+  greeting:'\u3053\u3093\u306B\u3061\u306F\uFF01<strong>llm.cpp</strong> \u3067\u52D5\u3044\u3066\u3044\u307E\u3059\u3002\u4F55\u304B\u304A\u624B\u4F1D\u3044\u3067\u304D\u307E\u3059\u304B\uFF1F',
+  msg_ph:'\u30E1\u30C3\u30BB\u30FC\u30B8\u2026\uFF08Enter\u3067\u9001\u4FE1\u3001Shift+Enter\u3067\u6539\u884C\uFF09',
+  chat_cleared:'\u30C1\u30E3\u30C3\u30C8\u3092\u30AF\u30EA\u30A2\u3057\u307E\u3057\u305F\u3002',
+  attach_img:'\u753B\u50CF\u3092\u6DFB\u4ED8',attach_file:'\u30D5\u30A1\u30A4\u30EB\u3092\u6DFB\u4ED8',
+  tool_calls_h:'\uD83D\uDD27 \u30C4\u30FC\u30EB\u547C\u3073\u51FA\u3057 \u2014 \u5B9F\u884C\u524D\u306B\u78BA\u8A8D',
+  allow:'\u2713 \u8A31\u53EF',deny:'\u2717 \u62D2\u5426',denied:'\u62D2\u5426\u3055\u308C\u307E\u3057\u305F',
+  tool_not_impl:'\u3053\u306E\u30C4\u30FC\u30EB\u306F\u30C7\u30E2\u3067\u306F\u672A\u5B9F\u88C5\u3067\u3059\u3002',
+  file_prefix:'\u30D5\u30A1\u30A4\u30EB\uFF1A',img_suffix:' \u679A\u306E\u753B\u50CF'
+}
+};
+var curLang=localStorage.getItem('llmcpp_lang')||'en';
+function tr(key){var d=LANG[curLang]||LANG.en;return Object.prototype.hasOwnProperty.call(d,key)?d[key]:(Object.prototype.hasOwnProperty.call(LANG.en,key)?LANG.en[key]:key);}
+function applyLang(){
+  document.getElementById('html-root').lang=curLang;
+  document.getElementById('page-title').textContent=tr('title');
+  document.querySelectorAll('[data-i18n]').forEach(function(el){el.textContent=tr(el.getAttribute('data-i18n'));});
+  document.querySelectorAll('[data-i18n-ph]').forEach(function(el){el.placeholder=tr(el.getAttribute('data-i18n-ph'));});
+  document.querySelectorAll('[data-i18n-title]').forEach(function(el){el.title=tr(el.getAttribute('data-i18n-title'));});
+  var gb=document.getElementById('greeting-bubble');if(gb)gb.innerHTML=tr('greeting');
+  var sel=document.getElementById('lang');if(sel)sel.value=curLang;
+}
+function setLang(lang){curLang=lang;localStorage.setItem('llmcpp_lang',lang);applyLang();}
+// ---- App state ----
 var BASE=(window.location.protocol==='http:'||window.location.protocol==='https:')
   ?window.location.origin:'http://localhost:8080';
 var srvEl=document.getElementById('srvurl');
 srvEl.value=BASE;srvEl.placeholder='http://localhost:8080';
 var history=[];
 var imgs=[];
+var attachedFiles=[];
 var busy=false;
 var _toolCallData=[];
+// ---- Utilities ----
 function autoH(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,140)+'px';}
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function fmt(t){
-  t=t.replace(/```(\w*)\n([\s\S]*?)```/g,function(_,l,c){return'<pre><code>'+esc(c.trim())+'</code></pre>';});
-  t=t.replace(/`([^`\n]+)`/g,'<code>$1</code>');
-  t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
-  t=t.replace(/\*(.+?)\*/g,'<em>$1</em>');
-  t=t.replace(/\n/g,'<br>');
-  return t;
+function fmt(s){
+  s=s.replace(/```(\w*)\n([\s\S]*?)```/g,function(_,l,c){return'<pre><code>'+esc(c.trim())+'</code></pre>';});
+  s=s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
+  s=s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  s=s.replace(/\*(.+?)\*/g,'<em>$1</em>');
+  s=s.replace(/\n/g,'<br>');
+  return s;
 }
 function toast(msg,dur){
   var d=document.createElement('div');d.className='toast';d.textContent=msg;
   document.body.appendChild(d);setTimeout(function(){d.remove();},dur||3000);
 }
-function scrollBottom(){
-  var m=document.getElementById('msgs');m.scrollTop=m.scrollHeight;
-}
+function scrollBottom(){var m=document.getElementById('msgs');m.scrollTop=m.scrollHeight;}
 function addMsg(role,htmlContent){
   var d=document.createElement('div');d.className='msg '+role;
-  var av=document.createElement('div');av.className='avatar';av.textContent=role==='user'?'👤':'🤖';
+  var av=document.createElement('div');av.className='avatar';av.textContent=role==='user'?'\uD83D\uDC64':'\uD83E\uDD16';
   var bubble=document.createElement('div');bubble.className='bubble';
   bubble.innerHTML=htmlContent;
   d.appendChild(av);d.appendChild(bubble);
@@ -639,11 +728,15 @@ function addMsg(role,htmlContent){
 }
 function addThinking(){
   var d=document.createElement('div');d.className='msg assistant';
-  d.innerHTML='<div class="avatar">🤖</div><div class="bubble"><div class="dots"><span></span><span></span><span></span></div></div>';
+  var av=document.createElement('div');av.className='avatar';av.textContent='\uD83E\uDD16';
+  var bub=document.createElement('div');bub.className='bubble';
+  bub.innerHTML='<div class="dots"><span></span><span></span><span></span></div>';
+  d.appendChild(av);d.appendChild(bub);
   document.getElementById('msgs').appendChild(d);
   scrollBottom();
   return d;
 }
+// ---- Image attachment ----
 function attachImg(inp){
   var f=inp.files[0];if(!f)return;
   var r=new FileReader();
@@ -653,22 +746,41 @@ function attachImg(inp){
     var p=document.getElementById('imgprev');
     var idx=imgs.length-1;
     var th=document.createElement('div');th.className='img-thumb';
-    // Use DOM methods instead of innerHTML to avoid XSS with data URLs
     var img=document.createElement('img');img.src=dataUrl;
-    var btn=document.createElement('button');btn.className='rm';btn.textContent='×';
-    btn.addEventListener('click',function(){rmImg(idx,btn);});
+    var btn=document.createElement('button');btn.className='rm';btn.textContent='\xD7';
+    btn.addEventListener('click',function(){imgs[idx]=null;th.remove();});
     th.appendChild(img);th.appendChild(btn);
     p.appendChild(th);
   };
   r.readAsDataURL(f);inp.value='';
 }
-function rmImg(i,btn){imgs[i]=null;btn.parentElement.remove();}
+// ---- Text file attachment (max 512 KB) ----
+var MAX_FILE_BYTES=512*1024;
+function attachFile(inp){
+  var f=inp.files[0];if(!f)return;
+  if(f.size>MAX_FILE_BYTES){toast(f.name+' is too large (max 512 KB)');inp.value='';return;}
+  var r=new FileReader();
+  r.onload=function(e){
+    var idx=attachedFiles.length;
+    attachedFiles.push({name:f.name,content:e.target.result});
+    var p=document.getElementById('fileprev');
+    var chip=document.createElement('div');chip.className='file-chip';
+    var span=document.createElement('span');span.textContent=f.name;
+    var btn=document.createElement('button');btn.className='rm';btn.textContent='\xD7';
+    btn.addEventListener('click',function(){attachedFiles[idx]=null;chip.remove();});
+    chip.appendChild(span);chip.appendChild(btn);
+    p.appendChild(chip);
+  };
+  r.readAsText(f,'UTF-8');inp.value='';
+}
+// ---- Chat actions ----
 function clearChat(){
   history=[];
   var c=document.getElementById('msgs');c.innerHTML='';
   var d=document.createElement('div');d.className='msg assistant';
-  d.innerHTML='<div class="avatar">🤖</div><div class="bubble">Chat cleared.</div>';
-  c.appendChild(d);
+  var av=document.createElement('div');av.className='avatar';av.textContent='\uD83E\uDD16';
+  var bub=document.createElement('div');bub.className='bubble';bub.textContent=tr('chat_cleared');
+  d.appendChild(av);d.appendChild(bub);c.appendChild(d);
 }
 function getTools(){
   return[
@@ -681,7 +793,6 @@ function getTools(){
 // Safe math evaluator: only allows numbers, whitespace and +−*/^%() operators.
 function safeEval(expr){
   if(!/^[0-9\s\+\-\*\/\.\(\)\^%]+$/.test(expr))throw new Error('Invalid expression');
-  // Replace ^ with ** for exponentiation
   var safe=expr.replace(/\^/g,'**');
   return Function('"use strict";return('+safe+')')();
 }
@@ -692,9 +803,8 @@ function execTool(tc,resultDiv){
   try{
     if(fn.name==='calculator'){res=String(safeEval(args.expression||'0'));}
     else if(fn.name==='get_datetime'){res=new Date().toLocaleString();}
-    else{res='Tool not implemented in demo.';}
+    else{res=tr('tool_not_impl');}
   }catch(e){res='Error: '+e.message;}
-  // Use textContent for safe display, then set structured result
   resultDiv.innerHTML='';
   var strong=document.createElement('strong');strong.textContent='Result: ';
   var span=document.createElement('span');span.textContent=res;
@@ -702,13 +812,11 @@ function execTool(tc,resultDiv){
   history.push({role:'tool',tool_call_id:tc.id||'tc0',content:res});
   toast('Tool executed: '+fn.name);
 }
-// Tool call IDs stored outside DOM to avoid JSON-in-onclick injection
-var _toolCallData=[];
 function renderToolCalls(tcs,bubble){
   var block=document.createElement('div');block.className='tool-block';
-  var h4=document.createElement('h4');h4.textContent='🔧 Tool Calls — confirm before execution';
+  var h4=document.createElement('h4');h4.textContent=tr('tool_calls_h');
   block.appendChild(h4);
-  tcs.forEach(function(tc,i){
+  tcs.forEach(function(tc){
     var startIdx=_toolCallData.length;
     _toolCallData.push(tc);
     var item=document.createElement('div');item.className='tool-item';
@@ -717,10 +825,10 @@ function renderToolCalls(tcs,bubble){
     var argsDiv=document.createElement('div');argsDiv.className='args';argsDiv.textContent=fn.arguments||'';
     var actions=document.createElement('div');actions.className='tool-actions';
     var res=document.createElement('div');res.style.cssText='font-size:.78rem;color:var(--dim);margin-top:4px';
-    var allow=document.createElement('button');allow.className='btn btn-sm btn-ok';allow.textContent='✓ Allow';
+    var allow=document.createElement('button');allow.className='btn btn-sm btn-ok';allow.textContent=tr('allow');
     allow.addEventListener('click',function(){execTool(_toolCallData[startIdx],res);});
-    var deny=document.createElement('button');deny.className='btn btn-sm btn-danger';deny.textContent='✗ Deny';
-    deny.addEventListener('click',function(){res.textContent='Denied';});
+    var deny=document.createElement('button');deny.className='btn btn-sm btn-danger';deny.textContent=tr('deny');
+    deny.addEventListener('click',function(){res.textContent=tr('denied');});
     actions.appendChild(allow);actions.appendChild(deny);
     item.appendChild(fnDiv);item.appendChild(argsDiv);item.appendChild(actions);item.appendChild(res);
     block.appendChild(item);
@@ -730,20 +838,36 @@ function renderToolCalls(tcs,bubble){
 async function send(){
   var text=document.getElementById('inp').value.trim();
   var attachedImgs=imgs.filter(Boolean);
-  if(!text&&attachedImgs.length===0)return;
+  var activeFiles=attachedFiles.filter(Boolean);
+  if(!text&&attachedImgs.length===0&&activeFiles.length===0)return;
   if(busy)return;
   document.getElementById('inp').value='';
   document.getElementById('inp').style.height='auto';
   imgs=[];document.getElementById('imgprev').innerHTML='';
+  attachedFiles=[];document.getElementById('fileprev').innerHTML='';
+
+  // Prepend file contents to the user message text
+  var fullText=text;
+  if(activeFiles.length>0){
+    var prefix='';
+    activeFiles.forEach(function(f){prefix+='['+tr('file_prefix')+f.name+']\n'+f.content+'\n\n';});
+    fullText=prefix+text;
+  }
 
   var content;
   if(attachedImgs.length>0){
     content=[];
-    if(text)content.push({type:'text',text:text});
+    if(fullText)content.push({type:'text',text:fullText});
     attachedImgs.forEach(function(u){content.push({type:'image_url',image_url:{url:u}});});
-  }else{content=text;}
+  }else{content=fullText;}
 
-  var displayText=text+(attachedImgs.length?' ['+attachedImgs.length+' image(s)]':'');
+  // Build display label shown in the chat bubble
+  var parts=[];
+  if(activeFiles.length>0)parts.push('['+activeFiles.map(function(f){return f.name;}).join(', ')+']');
+  if(text)parts.push(text);
+  if(attachedImgs.length>0)parts.push('['+attachedImgs.length+tr('img_suffix')+']');
+  var displayText=parts.join(' ');
+
   history.push({role:'user',content:content});
   addMsg('user',esc(displayText));
 
@@ -799,6 +923,8 @@ async function send(){
   }catch(e){th.remove();toast('Error: '+e.message);}
   busy=false;document.getElementById('sendbtn').disabled=false;
 }
+// Apply language settings on page load
+applyLang();
 </script>
 </body>
 </html>
