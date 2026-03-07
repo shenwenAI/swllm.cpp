@@ -99,6 +99,8 @@ struct RunConfig {
     bool no_thinking = false;       // hide <think>...</think> blocks
     bool server_mode = false;       // run as HTTP API server
     int server_port = 8080;
+    std::string api_key;            // optional Bearer token for HTTP server
+    std::string model_name;         // display name reported by /v1/models
 };
 
 static void print_usage(const char* prog) {
@@ -129,6 +131,8 @@ static void print_usage(const char* prog) {
         "Server options:\n"
         "  --server                 Run as OpenAI-compatible HTTP API server\n"
         "  --port <N>               HTTP server port (default: 8080)\n"
+        "  --api-key <key>          Require Bearer token for server requests\n"
+        "  --model-name <name>      Model name reported by /v1/models (default: llm.cpp)\n"
         "\n"
         "Other:\n"
         "  -i, --interactive        Interactive chat mode\n"
@@ -196,6 +200,10 @@ static bool parse_args(int argc, char** argv, RunConfig& cfg) {
             cfg.server_mode = true;
         } else if (arg == "--port" && i + 1 < argc) {
             cfg.server_port = atoi(argv[++i]);
+        } else if (arg == "--api-key" && i + 1 < argc) {
+            cfg.api_key = argv[++i];
+        } else if (arg == "--model-name" && i + 1 < argc) {
+            cfg.model_name = argv[++i];
         } else if (arg == "-h" || arg == "--help") {
             return false;
         } else {
@@ -501,6 +509,8 @@ int main(int argc, char** argv) {
         ServerConfig srv;
         srv.port          = cfg.server_port;
         srv.system_prompt = cfg.system_prompt;
+        srv.api_key       = cfg.api_key;
+        srv.model_name    = cfg.model_name.empty() ? "llm.cpp" : cfg.model_name;
         run_server(model, sampler, srv);
         return 0;
     }

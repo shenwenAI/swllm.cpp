@@ -36,6 +36,20 @@ if(LLM_CUDA)
     find_package(CUDAToolkit REQUIRED)
     list(APPEND LLM_SOURCES src/cuda_kernels.cu)
     message(STATUS "CUDA enabled: ${CUDAToolkit_VERSION}")
+
+    # Pass host-compiler warning/optimisation flags through nvcc so that the
+    # CUDA translation units are compiled with the same settings as the rest of
+    # the project regardless of whether the host compiler is GCC/Clang or MSVC.
+    if(MSVC)
+        # /W3  – warning level 3 (matches the CXX setting above)
+        # /O2  – full optimisation
+        # /EHsc – standard C++ exception model (required by MSVC CUDA host)
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler /W3,/O2,/EHsc")
+        # Suppress MSVC warnings that CUDA headers commonly trigger
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler /wd4505,/wd4996")
+    else()
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -O2")
+    endif()
 endif()
 
 # Main executable
