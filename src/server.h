@@ -595,6 +595,13 @@ pre code{background:transparent;padding:0}
       </label>
       <div style="font-size:.75rem;color:var(--dim);margin-top:6px" data-i18n="tool_demo">Built-in demo tools: calculator, get_datetime</div>
     </div>
+    <div>
+      <h3 data-i18n="upnp_h">UPnP Port Mapping</h3>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="upnp" onchange="toggleUpnp(this.checked)"> <span data-i18n="upnp_enable">Enable UPnP</span>
+      </label>
+      <div id="upnp-status" style="font-size:.75rem;color:var(--dim);margin-top:6px" data-i18n="upnp_desc">Map server port for external access via UPnP IGD</div>
+    </div>
   </div>
 </div>
 <div class="main">
@@ -636,7 +643,10 @@ en:{
   allow:'\u2713 Allow',deny:'\u2717 Deny',denied:'Denied',
   tool_not_impl:'Tool not implemented in demo.',
   file_prefix:'File: ',img_suffix:' image(s)',
-  download_html:'\u2B07 Download UI'
+  download_html:'\u2B07 Download UI',
+  upnp_h:'UPnP Port Mapping',upnp_enable:'Enable UPnP',
+  upnp_desc:'Map server port for external access via UPnP IGD',
+  upnp_on:'UPnP port mapping active',upnp_off:'UPnP port mapping disabled'
 },
 zh:{
   title:'llm.cpp \u804A\u5929',subtitle:'\u8F7B\u91CF\u7EA7 LLM \u63A8\u7406\u5F15\u64CE',
@@ -657,7 +667,10 @@ zh:{
   allow:'\u2713 \u5141\u8BB8',deny:'\u2717 \u62D2\u7EDD',denied:'\u5DF2\u62D2\u7EDD',
   tool_not_impl:'\u6F14\u793A\u4E2D\u672A\u5B9E\u73B0\u6B64\u5DE5\u5177\u3002',
   file_prefix:'\u6587\u4EF6\uFF1A',img_suffix:' \u5F20\u56FE\u7247',
-  download_html:'\u2B07 \u4E0B\u8F7D\u754C\u9762'
+  download_html:'\u2B07 \u4E0B\u8F7D\u754C\u9762',
+  upnp_h:'UPnP \u7AEF\u53E3\u6620\u5C04',upnp_enable:'\u542F\u7528 UPnP',
+  upnp_desc:'\u901A\u8FC7 UPnP IGD \u6620\u5C04\u670D\u52A1\u5668\u7AEF\u53E3\u4EE5\u4FBF\u5916\u90E8\u8BBF\u95EE',
+  upnp_on:'UPnP \u7AEF\u53E3\u6620\u5C04\u5DF2\u542F\u7528',upnp_off:'UPnP \u7AEF\u53E3\u6620\u5C04\u5DF2\u5173\u95ED'
 },
 ja:{
   title:'llm.cpp \u30C1\u30E3\u30C3\u30C8',
@@ -681,7 +694,10 @@ ja:{
   allow:'\u2713 \u8A31\u53EF',deny:'\u2717 \u62D2\u5426',denied:'\u62D2\u5426\u3055\u308C\u307E\u3057\u305F',
   tool_not_impl:'\u3053\u306E\u30C4\u30FC\u30EB\u306F\u30C7\u30E2\u3067\u306F\u672A\u5B9F\u88C5\u3067\u3059\u3002',
   file_prefix:'\u30D5\u30A1\u30A4\u30EB\uFF1A',img_suffix:' \u679A\u306E\u753B\u50CF',
-  download_html:'\u2B07 UI\u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9'
+  download_html:'\u2B07 UI\u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9',
+  upnp_h:'UPnP \u30DD\u30FC\u30C8\u30DE\u30C3\u30D4\u30F3\u30B0',upnp_enable:'UPnP \u3092\u6709\u52B9\u5316',
+  upnp_desc:'UPnP IGD \u7D4C\u7531\u3067\u30B5\u30FC\u30D0\u30FC\u30DD\u30FC\u30C8\u3092\u30DE\u30C3\u30D4\u30F3\u30B0',
+  upnp_on:'UPnP \u30DD\u30FC\u30C8\u30DE\u30C3\u30D4\u30F3\u30B0\u6709\u52B9',upnp_off:'UPnP \u30DD\u30FC\u30C8\u30DE\u30C3\u30D4\u30F3\u30B0\u7121\u52B9'
 }
 };
 var curLang=localStorage.getItem('llmcpp_lang')||'en';
@@ -931,6 +947,28 @@ async function send(){
   }catch(e){th.remove();toast('Error: '+e.message);}
   busy=false;document.getElementById('sendbtn').disabled=false;
 }
+// ---- UPnP toggle ----
+async function toggleUpnp(enabled){
+  var key=document.getElementById('apikey').value.trim();
+  var hdrs={'Content-Type':'application/json'};
+  if(key)hdrs['Authorization']='Bearer '+key;
+  try{
+    var r=await fetch((document.getElementById('srvurl').value||BASE)+'/v1/upnp',
+      {method:'POST',headers:hdrs,body:JSON.stringify({enabled:enabled})});
+    var j=await r.json();
+    document.getElementById('upnp').checked=j.enabled;
+    document.getElementById('upnp-status').textContent=j.enabled?tr('upnp_on'):tr('upnp_off');
+    toast(j.enabled?tr('upnp_on'):tr('upnp_off'));
+  }catch(e){toast('UPnP error: '+e.message);}
+}
+(async function(){
+  try{
+    var r=await fetch((document.getElementById('srvurl').value||BASE)+'/v1/upnp');
+    var j=await r.json();
+    document.getElementById('upnp').checked=j.enabled;
+    if(j.enabled)document.getElementById('upnp-status').textContent=tr('upnp_on');
+  }catch(e){}
+})();
 // Apply language settings on page load
 applyLang();
 </script>
@@ -1329,7 +1367,39 @@ static bool upnp_map_port(int port) {
     return true;
 }
 
+// Remove a previously added UPnP port mapping.  Returns true on success.
+static bool upnp_unmap_port(int port) {
+    fprintf(stderr, "UPnP: removing port mapping for port %d...\n", port);
+    UpnpIgdInfo igd = upnp_discover_igd(3);
+    if (!igd.valid) {
+        fprintf(stderr, "UPnP: no IGD found\n");
+        return false;
+    }
+    std::string ps = std::to_string(port);
+    std::string soap_body =
+        "<NewRemoteHost></NewRemoteHost>"
+        "<NewExternalPort>" + ps + "</NewExternalPort>"
+        "<NewProtocol>TCP</NewProtocol>";
+    std::string resp_body;
+    bool ok = upnp_soap_call(igd.host, igd.port, igd.control_path,
+                              igd.service_type, "DeletePortMapping", soap_body, &resp_body);
+    if (ok && resp_body.find("UPnPError") == std::string::npos &&
+              resp_body.find("Fault")     == std::string::npos) {
+        fprintf(stderr, "UPnP: port %d unmapped successfully\n", port);
+        return true;
+    }
+    std::string code = xml_text(resp_body, "errorCode");
+    std::string desc = xml_text(resp_body, "errorDescription");
+    fprintf(stderr, "UPnP: DeletePortMapping failed%s%s\n",
+            code.empty() ? "" : (" (code=" + code + " " + desc + ")").c_str(),
+            !ok ? " (no HTTP 200)" : "");
+    return false;
+}
+
 // ---- Server struct ----
+
+// Global UPnP state – modified by the /v1/upnp endpoint and --upnp flag
+static bool g_upnp_active = false;
 
 struct ServerConfig {
     std::string host = "0.0.0.0";
@@ -1522,6 +1592,31 @@ static void handle_client(socket_t client_fd, Model& model, Sampler& sampler,
             "{\"object\":\"list\",\"data\":[{\"id\":\"" + id + "\""
             ",\"object\":\"model\",\"created\":" + std::to_string(ts) +
             ",\"owned_by\":\"llm.cpp\"}]}";
+        http_send(client_fd, "200 OK", "application/json", resp);
+        CLOSE_SOCKET(client_fd);
+        return;
+    }
+
+    // ---- GET /v1/upnp – UPnP port mapping status ----
+    if (method == "GET" && path == "/v1/upnp") {
+        std::string resp = "{\"enabled\":" +
+                           std::string(g_upnp_active ? "true" : "false") + "}";
+        http_send(client_fd, "200 OK", "application/json", resp);
+        CLOSE_SOCKET(client_fd);
+        return;
+    }
+
+    // ---- POST /v1/upnp – enable or disable UPnP port mapping ----
+    if (method == "POST" && path == "/v1/upnp") {
+        bool enable = json_get_bool(body, "enabled", false);
+        if (enable && !g_upnp_active) {
+            g_upnp_active = upnp_map_port(cfg.port);
+        } else if (!enable && g_upnp_active) {
+            upnp_unmap_port(cfg.port);
+            g_upnp_active = false;
+        }
+        std::string resp = "{\"enabled\":" +
+                           std::string(g_upnp_active ? "true" : "false") + "}";
         http_send(client_fd, "200 OK", "application/json", resp);
         CLOSE_SOCKET(client_fd);
         return;
@@ -1731,7 +1826,7 @@ static void run_server(Model& model, Sampler& sampler, const ServerConfig& cfg) 
 
     // UPnP port mapping (non-blocking: runs before accept loop)
     if (cfg.upnp) {
-        upnp_map_port(cfg.port);
+        g_upnp_active = upnp_map_port(cfg.port);
         fprintf(stderr, "\n");
     }
 

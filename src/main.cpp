@@ -244,7 +244,9 @@ static std::string apply_chat_template(const Model& model, const std::string& pr
 static void generate(Model& model, Sampler& sampler, const std::string& prompt,
                      int max_tokens, const std::string& system_prompt = "",
                      bool use_chat_template = false,
-                     bool no_thinking = false) {
+                     bool no_thinking = false,
+                     std::string* output_capture = nullptr,
+                     bool skip_bos = false) {
     // Optionally apply chat template
     std::string final_prompt = prompt;
     bool template_applied = false;
@@ -259,7 +261,8 @@ static void generate(Model& model, Sampler& sampler, const std::string& prompt,
     // Encode prompt
     // Skip BOS when chat template is applied: the template's own special tokens
     // (e.g., <|im_start|>) serve as the proper start markers.
-    std::vector<int> tokens = model.tokenizer.encode(final_prompt, !template_applied);
+    bool add_bos = !template_applied && !skip_bos;
+    std::vector<int> tokens = model.tokenizer.encode(final_prompt, add_bos);
 
     fprintf(stderr, "Prompt tokens: %zu\n", tokens.size());
     fprintf(stderr, "Generating up to %d tokens...\n\n", max_tokens);
@@ -311,6 +314,7 @@ static void generate(Model& model, Sampler& sampler, const std::string& prompt,
 
         // Decode and print (with optional thinking filter)
         std::string token_str = model.tokenizer.decode(next_token);
+        if (output_capture) *output_capture += token_str;
         if (no_thinking) {
             output_buf += token_str;
             // Process buffer for <think> / </think> tags
@@ -387,8 +391,11 @@ static void interactive_mode(Model& model, Sampler& sampler, int max_tokens,
                             const std::string& system_prompt = "",
                             bool use_chat_template = false,
                             bool no_thinking = false) {
-    fprintf(stderr, "Interactive mode. Type your prompt and press Enter.\n");
-    fprintf(stderr, "Type 'quit' or 'exit' to stop.\n\n");
+    fprintf(stderr, "Interactive mode (multi-turn). Type your prompt and press Enter.\n");
+    fprintf(stderr, "Type 'quit' or 'exit' to stop, 'new' to start a new conversation.\n\n");
+
+    // Conversation history for multi-turn chat
+    std::vector<std::pair<std::string, std::string>> history;  // (role, content)
 
     char line[4096];
     while (true) {
@@ -405,12 +412,40 @@ static void interactive_mode(Model& model, Sampler& sampler, int max_tokens,
 
         if (len == 0) continue;
         if (strcmp(line, "quit") == 0 || strcmp(line, "exit") == 0) break;
+        if (strcmp(line, "new") == 0) {
+            history.clear();
+            fprintf(stderr, "New conversation started.\n\n");
+            continue;
+        }
 
-        // Reset state for new conversation
+        // Add user message to history
+        history.emplace_back("user", std::string(line));
+
+        // Reset state for re-prefill of entire conversation
         model.clear_state();
 
-        generate(model, sampler, line, max_tokens, system_prompt,
-                 use_chat_template, no_thinking);
+        // Build full multi-turn prompt when chat template is available
+        if (use_chat_template && has_chatml_support(model)) {
+            std::string prompt = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n";
+            for (const auto& msg : history) {
+                prompt += "<|im_start|>" + msg.first + "\n" + msg.second + "<|im_end|>\n";
+            }
+            prompt += "<|im_start|>assistant\n";
+
+            std::string output;
+            generate(model, sampler, prompt, max_tokens, system_prompt,
+                     false, no_thinking, &output, true);
+
+            // Store assistant reply in history for next turn
+            // Strip trailing whitespace from captured output
+            while (!output.empty() && (output.back() == '\n' || output.back() == '\r'
+                                       || output.back() == ' '))
+                output.pop_back();
+            history.emplace_back("assistant", output);
+        } else {
+            generate(model, sampler, line, max_tokens, system_prompt,
+                     use_chat_template, no_thinking);
+        }
         printf("\n");
     }
 }
