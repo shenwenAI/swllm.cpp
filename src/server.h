@@ -30,6 +30,7 @@
 #  include <netinet/in.h>
 #  include <arpa/inet.h>   // inet_pton, inet_ntop, inet_ntoa
 #  include <sys/time.h>    // struct timeval (SO_RCVTIMEO timeout)
+#  include <sys/wait.h>    // WIFEXITED, WEXITSTATUS (tool execution)
 #  include <unistd.h>
    typedef int socket_t;
 #  define CLOSE_SOCKET(s) close(s)
@@ -1505,7 +1506,9 @@ static std::string tool_exec_command(const std::string& command) {
     int status = _pclose(pipe);
 #else
     int raw_status = pclose(pipe);
-    int status = (raw_status != -1) ? ((raw_status >> 8) & 0xff) : -1;
+    int status = -1;
+    if (raw_status != -1 && WIFEXITED(raw_status))
+        status = WEXITSTATUS(raw_status);
 #endif
     if (!result.empty() && result.back() != '\n') result += '\n';
     result += "[exit code: " + std::to_string(status) + "]";
@@ -1694,7 +1697,8 @@ static void server_generate_stream(
 // Handle a single client connection.
 static void handle_client(socket_t client_fd, Model& model, Sampler& sampler,
                            const ServerConfig& cfg) {
-    // Set receive timeout to prevent the server from blocking indefinitely
+    // Set receive timeout (30s) to prevent the server from blocking
+    // indefinitely on incomplete or slow client requests.
 #ifdef _WIN32
     DWORD rcv_timeout = 30000;
     setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO,
@@ -1857,19 +1861,23 @@ static void handle_client(socket_t client_fd, Model& model, Sampler& sampler,
             if (code.empty()) {
                 result = "Error: empty code";
             } else {
-                // Write code to a temp file and execute
-#ifdef _WIN32
-                const char* tmpdir = getenv("TEMP");
-                if (!tmpdir) tmpdir = "C:\\Temp";
-                std::string tmpfile = std::string(tmpdir) + "\\llmcpp_code";
-#else
-                std::string tmpfile = "/tmp/llmcpp_code";
-#endif
+                // Write code to a unique temp file and execute
                 std::string ext = ".py";
                 std::string runner = "python3";
                 if (lang == "javascript" || lang == "js") { ext = ".js"; runner = "node"; }
                 else if (lang == "bash" || lang == "shell" || lang == "sh") { ext = ".sh"; runner = "bash"; }
-                tmpfile += ext;
+
+#ifdef _WIN32
+                const char* tmpdir = getenv("TEMP");
+                if (!tmpdir) tmpdir = "C:\\Temp";
+                std::string tmpfile = std::string(tmpdir) + "\\llmcpp_" +
+                    std::to_string(time(nullptr)) + "_" +
+                    std::to_string(reinterpret_cast<uintptr_t>(&code)) + ext;
+#else
+                std::string tmpfile = "/tmp/llmcpp_" +
+                    std::to_string(time(nullptr)) + "_" +
+                    std::to_string(getpid()) + ext;
+#endif
 
                 FILE* tmp_f = fopen(tmpfile.c_str(), "w");
                 if (!tmp_f) {
@@ -1902,6 +1910,9 @@ static void handle_client(socket_t client_fd, Model& model, Sampler& sampler,
                 result = "Error: empty query";
             } else if (search_url.empty()) {
                 result = "Error: no search URL configured";
+            } else if (search_url.substr(0, 7) != "http://" &&
+                       search_url.substr(0, 8) != "https://") {
+                result = "Error: search URL must use http:// or https://";
             } else {
                 std::string enc_query = url_encode(query);
                 std::string url = search_url;
