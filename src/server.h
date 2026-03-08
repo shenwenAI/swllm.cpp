@@ -593,7 +593,7 @@ pre code{background:transparent;padding:0}
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
         <input type="checkbox" id="agent"> <span data-i18n="enable_tool">Enable tool calling</span>
       </label>
-      <div style="font-size:.75rem;color:var(--dim);margin-top:6px" data-i18n="tool_demo">Built-in demo tools: calculator, get_datetime</div>
+      <div style="font-size:.75rem;color:var(--dim);margin-top:6px" data-i18n="tool_demo">Built-in tools: calculator, get_datetime, execute_command, code_interpreter, text_editor, web_search</div>
     </div>
     <div>
       <h3 data-i18n="upnp_h">UPnP Port Mapping</h3>
@@ -601,6 +601,12 @@ pre code{background:transparent;padding:0}
         <input type="checkbox" id="upnp" onchange="toggleUpnp(this.checked)"> <span data-i18n="upnp_enable">Enable UPnP</span>
       </label>
       <div id="upnp-status" style="font-size:.75rem;color:var(--dim);margin-top:6px" data-i18n="upnp_desc">Map server port for external access via UPnP IGD</div>
+    </div>
+    <div>
+      <h3 data-i18n="search_h">Web Search</h3>
+      <label data-i18n="search_url_label">Search Engine URL</label>
+      <input type="text" id="searchurl" value="https://html.duckduckgo.com/html/?q={query}" data-i18n-ph="search_url_ph" placeholder="https://html.duckduckgo.com/html/?q={query}">
+      <div style="font-size:.75rem;color:var(--dim);margin-top:4px" data-i18n="search_desc">Use {query} as placeholder for search terms</div>
     </div>
   </div>
 </div>
@@ -636,7 +642,7 @@ en:{
   top_p:'Top-P',api_key_label:'API Key (Bearer token)',api_key_ph:'Leave blank if not set',
   server_url:'Server URL',clear_chat:'\uD83D\uDDD1 Clear Chat',
   agent_tools_h:'Agent / Tools',enable_tool:'Enable tool calling',
-  tool_demo:'Built-in demo tools: calculator, get_datetime',
+  tool_demo:'Built-in tools: calculator, get_datetime, execute_command, code_interpreter, text_editor, web_search',
   greeting:'Hello! I\'m powered by <strong>llm.cpp</strong>. How can I help you today?',
   msg_ph:'Message\u2026 (Enter to send, Shift+Enter for newline)',
   chat_cleared:'Chat cleared.',attach_img:'Attach image',attach_file:'Attach file',
@@ -647,7 +653,11 @@ en:{
   download_html:'\u2B07 Download UI',
   upnp_h:'UPnP Port Mapping',upnp_enable:'Enable UPnP',
   upnp_desc:'Map server port for external access via UPnP IGD',
-  upnp_on:'UPnP port mapping active',upnp_off:'UPnP port mapping disabled'
+  upnp_on:'UPnP port mapping active',upnp_off:'UPnP port mapping disabled',
+  search_h:'Web Search',search_url_label:'Search Engine URL',
+  search_url_ph:'https://html.duckduckgo.com/html/?q={query}',
+  search_desc:'Use {query} as placeholder for search terms',
+  executing:'Executing...'
 },
 zh:{
   title:'llm.cpp \u804A\u5929',subtitle:'\u8F7B\u91CF\u7EA7 LLM \u63A8\u7406\u5F15\u64CE',
@@ -659,7 +669,7 @@ zh:{
   server_url:'\u670D\u52A1\u5668\u5730\u5740',
   clear_chat:'\uD83D\uDDD1 \u6E05\u9664\u5BF9\u8BDD',
   agent_tools_h:'\u4EE3\u7406 / \u5DE5\u5177',enable_tool:'\u542F\u7528\u5DE5\u5177\u8C03\u7528',
-  tool_demo:'\u5185\u7F6E\u6F14\u793A\u5DE5\u5177\uFF1A\u8BA1\u7B97\u5668\u3001\u83B7\u53D6\u65E5\u671F\u65F6\u95F4',
+  tool_demo:'\u5185\u7F6E\u5DE5\u5177\uFF1A\u8BA1\u7B97\u5668\u3001\u83B7\u53D6\u65E5\u671F\u65F6\u95F4\u3001\u6267\u884C\u547D\u4EE4\u3001\u4EE3\u7801\u89E3\u91CA\u5668\u3001\u6587\u672C\u7F16\u8F91\u5668\u3001\u7F51\u7EDC\u641C\u7D22',
   greeting:'\u4F60\u597D\uFF01\u6211\u7531 <strong>llm.cpp</strong> \u9A71\u52A8\uFF0C\u6709\u4EC0\u4E48\u53EF\u4EE5\u5E2E\u52A9\u4F60\u7684\uFF1F',
   msg_ph:'\u8F93\u5165\u6D88\u606F\u2026\uFF08Enter \u53D1\u9001\uFF0CShift+Enter \u6362\u884C\uFF09',
   chat_cleared:'\u5BF9\u8BDD\u5DF2\u6E05\u9664\u3002',
@@ -671,7 +681,11 @@ zh:{
   download_html:'\u2B07 \u4E0B\u8F7D\u754C\u9762',
   upnp_h:'UPnP \u7AEF\u53E3\u6620\u5C04',upnp_enable:'\u542F\u7528 UPnP',
   upnp_desc:'\u901A\u8FC7 UPnP IGD \u6620\u5C04\u670D\u52A1\u5668\u7AEF\u53E3\u4EE5\u4FBF\u5916\u90E8\u8BBF\u95EE',
-  upnp_on:'UPnP \u7AEF\u53E3\u6620\u5C04\u5DF2\u542F\u7528',upnp_off:'UPnP \u7AEF\u53E3\u6620\u5C04\u5DF2\u5173\u95ED'
+  upnp_on:'UPnP \u7AEF\u53E3\u6620\u5C04\u5DF2\u542F\u7528',upnp_off:'UPnP \u7AEF\u53E3\u6620\u5C04\u5DF2\u5173\u95ED',
+  search_h:'\u7F51\u7EDC\u641C\u7D22',search_url_label:'\u641C\u7D22\u5F15\u64CE URL',
+  search_url_ph:'https://html.duckduckgo.com/html/?q={query}',
+  search_desc:'\u4F7F\u7528 {query} \u4F5C\u4E3A\u641C\u7D22\u8BCD\u5360\u4F4D\u7B26',
+  executing:'\u6267\u884C\u4E2D...'
 },
 ja:{
   title:'llm.cpp \u30C1\u30E3\u30C3\u30C8',
@@ -686,7 +700,7 @@ ja:{
   clear_chat:'\uD83D\uDDD1 \u30C1\u30E3\u30C3\u30C8\u3092\u30AF\u30EA\u30A2',
   agent_tools_h:'\u30A8\u30FC\u30B8\u30A7\u30F3\u30C8 / \u30C4\u30FC\u30EB',
   enable_tool:'\u30C4\u30FC\u30EB\u547C\u3073\u51FA\u3057\u3092\u6709\u52B9\u5316',
-  tool_demo:'\u5185\u8535\u30C7\u30E2\u30C4\u30FC\u30EB\uFF1A\u8A08\u7B97\u6A5F\u3001\u65E5\u6642\u53D6\u5F97',
+  tool_demo:'\u5185\u8535\u30C4\u30FC\u30EB\uFF1A\u8A08\u7B97\u6A5F\u3001\u65E5\u6642\u53D6\u5F97\u3001\u30B3\u30DE\u30F3\u30C9\u5B9F\u884C\u3001\u30B3\u30FC\u30C9\u30A4\u30F3\u30BF\u30FC\u30D7\u30EA\u30BF\u30FC\u3001\u30C6\u30AD\u30B9\u30C8\u30A8\u30C7\u30A3\u30BF\u30FC\u3001\u30A6\u30A7\u30D6\u691C\u7D22',
   greeting:'\u3053\u3093\u306B\u3061\u306F\uFF01<strong>llm.cpp</strong> \u3067\u52D5\u3044\u3066\u3044\u307E\u3059\u3002\u4F55\u304B\u304A\u624B\u4F1D\u3044\u3067\u304D\u307E\u3059\u304B\uFF1F',
   msg_ph:'\u30E1\u30C3\u30BB\u30FC\u30B8\u2026\uFF08Enter\u3067\u9001\u4FE1\u3001Shift+Enter\u3067\u6539\u884C\uFF09',
   chat_cleared:'\u30C1\u30E3\u30C3\u30C8\u3092\u30AF\u30EA\u30A2\u3057\u307E\u3057\u305F\u3002',
@@ -698,7 +712,11 @@ ja:{
   download_html:'\u2B07 UI\u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9',
   upnp_h:'UPnP \u30DD\u30FC\u30C8\u30DE\u30C3\u30D4\u30F3\u30B0',upnp_enable:'UPnP \u3092\u6709\u52B9\u5316',
   upnp_desc:'UPnP IGD \u7D4C\u7531\u3067\u30B5\u30FC\u30D0\u30FC\u30DD\u30FC\u30C8\u3092\u30DE\u30C3\u30D4\u30F3\u30B0',
-  upnp_on:'UPnP \u30DD\u30FC\u30C8\u30DE\u30C3\u30D4\u30F3\u30B0\u6709\u52B9',upnp_off:'UPnP \u30DD\u30FC\u30C8\u30DE\u30C3\u30D4\u30F3\u30B0\u7121\u52B9'
+  upnp_on:'UPnP \u30DD\u30FC\u30C8\u30DE\u30C3\u30D4\u30F3\u30B0\u6709\u52B9',upnp_off:'UPnP \u30DD\u30FC\u30C8\u30DE\u30C3\u30D4\u30F3\u30B0\u7121\u52B9',
+  search_h:'\u30A6\u30A7\u30D6\u691C\u7D22',search_url_label:'\u691C\u7D22\u30A8\u30F3\u30B8\u30F3URL',
+  search_url_ph:'https://html.duckduckgo.com/html/?q={query}',
+  search_desc:'{query} \u3092\u691C\u7D22\u8A9E\u306E\u30D7\u30EC\u30FC\u30B9\u30DB\u30EB\u30C0\u30FC\u3068\u3057\u3066\u4F7F\u7528',
+  executing:'\u5B9F\u884C\u4E2D...'
 }
 };
 var curLang=localStorage.getItem('llmcpp_lang')||'en';
@@ -812,7 +830,15 @@ function getTools(){
     {type:'function',function:{name:'calculator',description:'Evaluate a mathematical expression.',
       parameters:{type:'object',properties:{expression:{type:'string',description:'Math expression (numbers and operators only)'}},required:['expression']}}},
     {type:'function',function:{name:'get_datetime',description:'Get the current date and time.',
-      parameters:{type:'object',properties:{}}}}
+      parameters:{type:'object',properties:{}}}},
+    {type:'function',function:{name:'execute_command',description:'Execute a system command and return stdout/stderr. Requires user confirmation.',
+      parameters:{type:'object',properties:{command:{type:'string',description:'Shell command to execute'}},required:['command']}}},
+    {type:'function',function:{name:'code_interpreter',description:'Execute code and return the output. Supports python, javascript, bash.',
+      parameters:{type:'object',properties:{language:{type:'string',description:'Programming language: python, javascript, bash',enum:['python','javascript','bash']},code:{type:'string',description:'Code to execute'}},required:['language','code']}}},
+    {type:'function',function:{name:'text_editor',description:'View, create, or write text files on the server.',
+      parameters:{type:'object',properties:{command:{type:'string',description:'Operation: view, create, write',enum:['view','create','write']},path:{type:'string',description:'File path'},content:{type:'string',description:'File content (for create/write)'}},required:['command','path']}}},
+    {type:'function',function:{name:'web_search',description:'Search the web using the configured search engine.',
+      parameters:{type:'object',properties:{query:{type:'string',description:'Search query'}},required:['query']}}}
   ];
 }
 // Safe math evaluator: only allows numbers, whitespace and +−*/^%() operators.
@@ -821,18 +847,41 @@ function safeEval(expr){
   var safe=expr.replace(/\^/g,'**');
   return Function('"use strict";return('+safe+')')();
 }
-function execTool(tc,resultDiv){
+async function serverExecTool(name, args){
+  var key=document.getElementById('apikey').value.trim();
+  var hdrs={'Content-Type':'application/json'};
+  if(key)hdrs['Authorization']='Bearer '+key;
+  var payload={name:name};
+  for(var k in args){if(args.hasOwnProperty(k))payload[k]=args[k];}
+  var r=await fetch((document.getElementById('srvurl').value||BASE)+'/v1/tools/execute',
+    {method:'POST',headers:hdrs,body:JSON.stringify(payload)});
+  if(!r.ok)throw new Error('HTTP '+r.status+': '+(await r.text()));
+  var j=await r.json();
+  return j.result||'';
+}
+async function execTool(tc,resultDiv){
   var fn=tc.function||{};var args={};
   try{args=JSON.parse(fn.arguments||'{}');}catch(e){}
   var res='';
+  resultDiv.innerHTML='';
+  var loadSpan=document.createElement('span');loadSpan.style.color='var(--dim)';
+  loadSpan.textContent=tr('executing');resultDiv.appendChild(loadSpan);
   try{
     if(fn.name==='calculator'){res=String(safeEval(args.expression||'0'));}
     else if(fn.name==='get_datetime'){res=new Date().toLocaleString();}
+    else if(fn.name==='web_search'){
+      args.search_url=document.getElementById('searchurl').value||'';
+      res=await serverExecTool(fn.name,args);
+    }
+    else if(fn.name==='execute_command'||fn.name==='code_interpreter'||fn.name==='text_editor'){
+      res=await serverExecTool(fn.name,args);
+    }
     else{res=tr('tool_not_impl');}
   }catch(e){res='Error: '+e.message;}
   resultDiv.innerHTML='';
   var strong=document.createElement('strong');strong.textContent='Result: ';
-  var span=document.createElement('span');span.textContent=res;
+  var span=document.createElement('span');span.style.whiteSpace='pre-wrap';span.style.fontSize='.78rem';
+  span.textContent=res;
   resultDiv.appendChild(strong);resultDiv.appendChild(span);
   history.push({role:'tool',tool_call_id:tc.id||'tc0',content:res});
   toast('Tool executed: '+fn.name);
@@ -1408,6 +1457,135 @@ static bool upnp_unmap_port(int port) {
     return false;
 }
 
+// ---- Server-side tool execution helpers ----
+
+// Shell-quote a string for safe inclusion in a shell command.
+static std::string shell_quote(const std::string& s) {
+#ifdef _WIN32
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else out += c;
+    }
+    out += '"';
+    return out;
+#else
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    out += '\'';
+    return out;
+#endif
+}
+
+// Execute a shell command and capture stdout+stderr.  Output capped at 64 KB.
+static std::string tool_exec_command(const std::string& command) {
+    if (command.empty()) return "Error: empty command";
+    std::string cmd = command + " 2>&1";
+    std::string result;
+#ifdef _WIN32
+    FILE* pipe = _popen(cmd.c_str(), "r");
+#else
+    FILE* pipe = popen(cmd.c_str(), "r");
+#endif
+    if (!pipe) return "Error: failed to execute command";
+    char buf[4096];
+    const size_t max_bytes = 65536;
+    while (fgets(buf, sizeof(buf), pipe) != nullptr) {
+        result += buf;
+        if (result.size() > max_bytes) {
+            result += "\n...(output truncated)";
+            break;
+        }
+    }
+#ifdef _WIN32
+    int status = _pclose(pipe);
+#else
+    int raw_status = pclose(pipe);
+    int status = (raw_status != -1) ? ((raw_status >> 8) & 0xff) : -1;
+#endif
+    if (!result.empty() && result.back() != '\n') result += '\n';
+    result += "[exit code: " + std::to_string(status) + "]";
+    return result;
+}
+
+// Read a file and return its contents (max 1 MB).
+static std::string tool_read_file(const std::string& path) {
+    if (path.empty()) return "Error: empty path";
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return "Error: cannot open file: " + path;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz > 1024 * 1024) { fclose(f); return "Error: file too large (>1 MB)"; }
+    fseek(f, 0, SEEK_SET);
+    std::string content(static_cast<size_t>(sz), '\0');
+    size_t rd = fread(&content[0], 1, static_cast<size_t>(sz), f);
+    content.resize(rd);
+    fclose(f);
+    return content;
+}
+
+// Write content to a file.
+static std::string tool_write_file(const std::string& path,
+                                    const std::string& content) {
+    if (path.empty()) return "Error: empty path";
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return "Error: cannot write file: " + path;
+    fwrite(content.c_str(), 1, content.size(), f);
+    fclose(f);
+    return "File written: " + path + " (" + std::to_string(content.size()) + " bytes)";
+}
+
+// Simple URL-encode for query strings.
+static std::string url_encode(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() * 3);
+    for (unsigned char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            char hex[4];
+            snprintf(hex, sizeof(hex), "%%%02X", c);
+            out += hex;
+        }
+    }
+    return out;
+}
+
+// Strip HTML tags to extract plain text (for web search results).
+static std::string strip_html_tags(const std::string& html) {
+    std::string text;
+    text.reserve(html.size());
+    bool in_tag = false;
+    for (char c : html) {
+        if (c == '<') { in_tag = true; continue; }
+        if (c == '>') { in_tag = false; text += ' '; continue; }
+        if (!in_tag) text += c;
+    }
+    std::string out;
+    out.reserve(text.size());
+    bool prev_ws = false;
+    for (char c : text) {
+        bool ws = (c == ' ' || c == '\t' || c == '\r' || c == '\n');
+        if (ws) {
+            if (!prev_ws) out += (c == '\n') ? '\n' : ' ';
+            prev_ws = true;
+        } else {
+            out += c;
+            prev_ws = false;
+        }
+    }
+    if (out.size() > 32768) {
+        out.resize(32768);
+        out += "\n...(truncated)";
+    }
+    return out;
+}
+
 // ---- Server struct ----
 
 // Global UPnP state – modified by the /v1/upnp endpoint and --upnp flag
@@ -1516,6 +1694,17 @@ static void server_generate_stream(
 // Handle a single client connection.
 static void handle_client(socket_t client_fd, Model& model, Sampler& sampler,
                            const ServerConfig& cfg) {
+    // Set receive timeout to prevent the server from blocking indefinitely
+#ifdef _WIN32
+    DWORD rcv_timeout = 30000;
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&rcv_timeout), sizeof(rcv_timeout));
+#else
+    struct timeval rcv_tv;
+    rcv_tv.tv_sec = 30;
+    rcv_tv.tv_usec = 0;
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+#endif
     std::string raw = http_recv_all(client_fd);
     if (raw.empty()) { CLOSE_SOCKET(client_fd); return; }
 
@@ -1648,6 +1837,94 @@ static void handle_client(socket_t client_fd, Model& model, Sampler& sampler,
         }
         std::string resp = "{\"enabled\":" +
                            std::string(g_upnp_active ? "true" : "false") + "}";
+        http_send(client_fd, "200 OK", "application/json", resp);
+        CLOSE_SOCKET(client_fd);
+        return;
+    }
+
+    // ---- POST /v1/tools/execute – server-side tool execution ----
+    if (method == "POST" && path == "/v1/tools/execute") {
+        std::string tool_name = json_get_str(body, "name");
+        std::string result;
+
+        if (tool_name == "execute_command") {
+            std::string cmd = json_get_str(body, "command");
+            result = tool_exec_command(cmd);
+
+        } else if (tool_name == "code_interpreter") {
+            std::string lang = json_get_str(body, "language");
+            std::string code = json_get_str(body, "code");
+            if (code.empty()) {
+                result = "Error: empty code";
+            } else {
+                // Write code to a temp file and execute
+#ifdef _WIN32
+                const char* tmpdir = getenv("TEMP");
+                if (!tmpdir) tmpdir = "C:\\Temp";
+                std::string tmpfile = std::string(tmpdir) + "\\llmcpp_code";
+#else
+                std::string tmpfile = "/tmp/llmcpp_code";
+#endif
+                std::string ext = ".py";
+                std::string runner = "python3";
+                if (lang == "javascript" || lang == "js") { ext = ".js"; runner = "node"; }
+                else if (lang == "bash" || lang == "shell" || lang == "sh") { ext = ".sh"; runner = "bash"; }
+                tmpfile += ext;
+
+                FILE* tmp_f = fopen(tmpfile.c_str(), "w");
+                if (!tmp_f) {
+                    result = "Error: cannot create temp file";
+                } else {
+                    fwrite(code.c_str(), 1, code.size(), tmp_f);
+                    fclose(tmp_f);
+                    result = tool_exec_command(runner + " " + shell_quote(tmpfile));
+                    remove(tmpfile.c_str());
+                }
+            }
+
+        } else if (tool_name == "text_editor") {
+            std::string cmd = json_get_str(body, "command");
+            std::string file_path = json_get_str(body, "path");
+            if (cmd == "view") {
+                result = tool_read_file(file_path);
+            } else if (cmd == "create" || cmd == "write") {
+                std::string content = json_get_str(body, "content");
+                result = tool_write_file(file_path, content);
+            } else {
+                result = "Error: unknown text_editor command: " + cmd +
+                         " (use: view, create, write)";
+            }
+
+        } else if (tool_name == "web_search") {
+            std::string query = json_get_str(body, "query");
+            std::string search_url = json_get_str(body, "search_url");
+            if (query.empty()) {
+                result = "Error: empty query";
+            } else if (search_url.empty()) {
+                result = "Error: no search URL configured";
+            } else {
+                std::string enc_query = url_encode(query);
+                std::string url = search_url;
+                size_t ph = url.find("{query}");
+                if (ph != std::string::npos) {
+                    url.replace(ph, 7, enc_query);
+                } else {
+                    url += enc_query;
+                }
+                result = tool_exec_command("curl -sL --max-time 10 " +
+                                           shell_quote(url));
+                // Strip HTML tags for cleaner output
+                if (result.find('<') != std::string::npos &&
+                    result.find('>') != std::string::npos) {
+                    result = strip_html_tags(result);
+                }
+            }
+
+        } else {
+            result = "Error: unknown tool: " + tool_name;
+        }
+
+        std::string resp = "{\"result\":\"" + json_escape(result) + "\"}";
         http_send(client_fd, "200 OK", "application/json", resp);
         CLOSE_SOCKET(client_fd);
         return;
