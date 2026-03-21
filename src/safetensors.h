@@ -103,6 +103,7 @@ struct SafeTensorInfo {
     std::vector<int64_t> shape;
     uint64_t data_start;  // offset from start of data section
     uint64_t data_end;
+    size_t file_idx = 0;  // which shard file this tensor belongs to
 
     int64_t num_elements() const {
         int64_t n = 1;
@@ -518,6 +519,7 @@ private:
             } else {
                 // Tensor entry
                 SafeTensorInfo info = parse_tensor_entry(key, json, pos, json_len);
+                info.file_idx = file_idx;
                 tensors[key] = info;
             }
         }

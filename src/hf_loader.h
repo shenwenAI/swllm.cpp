@@ -264,12 +264,14 @@ struct HFModelConfig {
         if (model_type == "qwen3_5_text" || model_type == "qwen3_5") return "qwen35";
         if (model_type == "qwen3_5_moe_text" || model_type == "qwen3_5_moe") return "qwen35moe";
         if (model_type == "qwen3") return "qwen3";
+        if (model_type == "qwen2_5") return "qwen2";  // Qwen2.5 uses Qwen2 architecture
         if (model_type == "qwen2") return "qwen2";
         if (model_type == "qwen2_moe") return "qwen2moe";
 
         // LLaMA-compatible (standard transformer with interleaved RoPE)
         if (model_type == "llama") return "llama";
         if (model_type == "mistral") return "llama";
+        if (model_type == "mixtral") return "llama";  // Mixtral MoE uses LLaMA base arch
 
         // DeepSeek family
         if (model_type == "deepseek_v2") return "deepseek2";
@@ -279,11 +281,13 @@ struct HFModelConfig {
         if (model_type == "gemma") return "gemma";
         if (model_type == "gemma2") return "gemma2";
         if (model_type == "gemma3") return "gemma3";
+        if (model_type == "gemma3n") return "gemma3n";
 
         // Phi family (Microsoft)
         if (model_type == "phi") return "phi2";
         if (model_type == "phi3") return "phi3";
         if (model_type == "phi3small") return "phi3";
+        if (model_type == "phi4") return "phi4";
         if (model_type == "phimoe") return "phimoe";
 
         // InternLM family (Shanghai AI Lab)
@@ -313,6 +317,10 @@ struct HFModelConfig {
 
         // Nemotron (NVIDIA)
         if (model_type == "nemotron") return "nemotron";
+
+        // StableLM (Stability AI)
+        if (model_type == "stablelm") return "stablelm";
+        if (model_type == "stablelm_epoch") return "stablelm";
 
         // Falcon-H1 (Technology Innovation Institute)
         if (model_type == "falcon_h1") return "falcon-h1";
@@ -400,12 +408,31 @@ private:
 
 // Map HuggingFace PyTorch weight names to GGUF-style tensor names
 static inline std::string hf_to_gguf_tensor_name(const std::string& hf_name) {
-    // Embedding and output layers
+    // ---- Standard LLaMA-style prefix (model.embed_tokens / lm_head) ----
     if (hf_name == "model.embed_tokens.weight") return "token_embd.weight";
     if (hf_name == "model.norm.weight") return "output_norm.weight";
     if (hf_name == "lm_head.weight") return "output.weight";
 
-    // Layer-specific tensors: model.layers.{N}.xxx -> blk.{N}.xxx
+    // ---- InternLM2 top-level names ----
+    // InternLM2 uses model.tok_embeddings / output instead of embed_tokens / lm_head
+    if (hf_name == "model.tok_embeddings.weight") return "token_embd.weight";
+    if (hf_name == "output.weight") return "output.weight";
+
+    // ---- GPT-NeoX top-level names ----
+    if (hf_name == "gpt_neox.embed_in.weight")         return "token_embd.weight";
+    if (hf_name == "gpt_neox.final_layer_norm.weight") return "output_norm.weight";
+    if (hf_name == "gpt_neox.final_layer_norm.bias")   return "output_norm.bias";
+    if (hf_name == "embed_out.weight")                  return "output.weight";
+
+    // ---- ChatGLM / GLM4 top-level names ----
+    if (hf_name == "transformer.embedding.word_embeddings.weight")
+        return "token_embd.weight";
+    if (hf_name == "transformer.encoder.final_layernorm.weight")
+        return "output_norm.weight";
+    if (hf_name == "transformer.output_layer.weight")
+        return "output.weight";
+
+    // ---- Standard LLaMA-style layer tensors: model.layers.{N}.xxx ----
     if (hf_name.find("model.layers.") == 0) {
         // Extract layer number
         size_t dot1 = hf_name.find('.', 13);  // after "model.layers."
@@ -415,7 +442,7 @@ static inline std::string hf_to_gguf_tensor_name(const std::string& hf_name) {
 
         std::string prefix = "blk." + layer_num + ".";
 
-        // Attention layers
+        // Standard attention projections (LLaMA / Qwen / Mistral style)
         if (rest == "self_attn.q_proj.weight") return prefix + "attn_q.weight";
         if (rest == "self_attn.k_proj.weight") return prefix + "attn_k.weight";
         if (rest == "self_attn.v_proj.weight") return prefix + "attn_v.weight";
@@ -426,9 +453,18 @@ static inline std::string hf_to_gguf_tensor_name(const std::string& hf_name) {
         if (rest == "self_attn.q_norm.weight") return prefix + "attn_q_norm.weight";
         if (rest == "self_attn.k_norm.weight") return prefix + "attn_k_norm.weight";
 
-        // LayerNorm
+        // Phi-3 / Phi-3-small style: combined QKV projection
+        if (rest == "self_attn.qkv_proj.weight") return prefix + "attn_qkv.weight";
+
+        // LayerNorm (LLaMA / Qwen: pre-attention and pre-FFN)
         if (rest == "input_layernorm.weight")           return prefix + "attn_norm.weight";
         if (rest == "post_attention_layernorm.weight")   return prefix + "ffn_norm.weight";
+
+        // Gemma2 / Gemma3 add extra norms around the FFN block.
+        // pre_feedforward_layernorm replaces post_attention_layernorm as the
+        // pre-FFN norm; post_feedforward_layernorm is a post-FFN scale norm.
+        if (rest == "pre_feedforward_layernorm.weight")  return prefix + "ffn_norm.weight";
+        if (rest == "post_feedforward_layernorm.weight") return prefix + "ffn_post_norm.weight";
 
         // MLP / FFN (dense models)
         if (rest == "mlp.gate_proj.weight") return prefix + "ffn_gate.weight";
@@ -467,7 +503,65 @@ static inline std::string hf_to_gguf_tensor_name(const std::string& hf_name) {
         if (rest == "linear_attn.out_proj.weight")     return prefix + "ssm_out.weight";
         if (rest == "linear_attn.norm.weight")         return prefix + "ssm_norm.weight";
 
+        // InternLM2 layer-internal naming
+        // Uses attention.* and feed_forward.* sub-objects within model.layers.N
+        if (rest == "attention_norm.weight")       return prefix + "attn_norm.weight";
+        if (rest == "ffn_norm.weight")             return prefix + "ffn_norm.weight";
+        if (rest == "attention.wqkv.weight")       return prefix + "attn_qkv.weight";
+        if (rest == "attention.wo.weight")         return prefix + "attn_output.weight";
+        // InternLM2 gate-up-down FFN (w1=gate, w2=down, w3=up, SwiGLU style)
+        if (rest == "feed_forward.w1.weight")      return prefix + "ffn_gate.weight";
+        if (rest == "feed_forward.w2.weight")      return prefix + "ffn_down.weight";
+        if (rest == "feed_forward.w3.weight")      return prefix + "ffn_up.weight";
+
         // Return as-is if no mapping found
+        return prefix + rest;
+    }
+
+    // ---- GPT-NeoX layer tensors: gpt_neox.layers.{N}.xxx ----
+    if (hf_name.find("gpt_neox.layers.") == 0) {
+        size_t dot1 = hf_name.find('.', 16);  // after "gpt_neox.layers."
+        if (dot1 == std::string::npos) return hf_name;
+        std::string layer_num = hf_name.substr(16, dot1 - 16);
+        std::string rest = hf_name.substr(dot1 + 1);
+
+        std::string prefix = "blk." + layer_num + ".";
+
+        if (rest == "input_layernorm.weight")           return prefix + "attn_norm.weight";
+        if (rest == "input_layernorm.bias")             return prefix + "attn_norm.bias";
+        if (rest == "post_attention_layernorm.weight")  return prefix + "ffn_norm.weight";
+        if (rest == "post_attention_layernorm.bias")    return prefix + "ffn_norm.bias";
+        // Combined QKV (GPT-NeoX interleaved Q/K/V format)
+        if (rest == "attention.query_key_value.weight") return prefix + "attn_qkv.weight";
+        if (rest == "attention.query_key_value.bias")   return prefix + "attn_qkv.bias";
+        if (rest == "attention.dense.weight")           return prefix + "attn_output.weight";
+        if (rest == "attention.dense.bias")             return prefix + "attn_output.bias";
+        // GPT-NeoX uses a 2-layer MLP (no gate); map to gate+up for SwiGLU compat
+        if (rest == "mlp.dense_h_to_4h.weight")        return prefix + "ffn_up.weight";
+        if (rest == "mlp.dense_h_to_4h.bias")          return prefix + "ffn_up.bias";
+        if (rest == "mlp.dense_4h_to_h.weight")        return prefix + "ffn_down.weight";
+        if (rest == "mlp.dense_4h_to_h.bias")          return prefix + "ffn_down.bias";
+
+        return prefix + rest;
+    }
+
+    // ---- ChatGLM / GLM4 layer tensors: transformer.encoder.layers.{N}.xxx ----
+    if (hf_name.find("transformer.encoder.layers.") == 0) {
+        size_t dot1 = hf_name.find('.', 27);  // after "transformer.encoder.layers."
+        if (dot1 == std::string::npos) return hf_name;
+        std::string layer_num = hf_name.substr(27, dot1 - 27);
+        std::string rest = hf_name.substr(dot1 + 1);
+
+        std::string prefix = "blk." + layer_num + ".";
+
+        if (rest == "input_layernorm.weight")                   return prefix + "attn_norm.weight";
+        if (rest == "post_attention_layernorm.weight")           return prefix + "ffn_norm.weight";
+        if (rest == "self_attention.query_key_value.weight")     return prefix + "attn_qkv.weight";
+        if (rest == "self_attention.query_key_value.bias")       return prefix + "attn_qkv.bias";
+        if (rest == "self_attention.dense.weight")               return prefix + "attn_output.weight";
+        if (rest == "mlp.dense_h_to_4h.weight")                 return prefix + "ffn_gate.weight";
+        if (rest == "mlp.dense_4h_to_h.weight")                 return prefix + "ffn_down.weight";
+
         return prefix + rest;
     }
 
@@ -737,6 +831,76 @@ private:
 
 // ---- Find SafeTensors files in a directory ----
 
+// Parse model.safetensors.index.json to get ordered list of shard files.
+// The index file maps tensor names to filenames; we return the unique files in
+// encounter order so that file_idx values match the parsing order used by
+// SafeTensorsFile::load_multi().
+static inline std::vector<std::string> find_safetensors_from_index(
+        const std::string& dir, const std::string& index_path) {
+    std::string json = read_file_to_string(index_path);
+    if (json.empty()) return {};
+
+    // Find the "weight_map" object
+    size_t wm_pos = json.find("\"weight_map\"");
+    if (wm_pos == std::string::npos) return {};
+    size_t brace = json.find('{', wm_pos);
+    if (brace == std::string::npos) return {};
+
+    // Collect filenames in first-encounter order (preserves shard ordering)
+    std::vector<std::string> files;
+    std::unordered_map<std::string, size_t> seen;
+
+    size_t pos = brace + 1;
+    while (pos < json.size()) {
+        // Skip whitespace and commas
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' ||
+                                      json[pos] == '\n' || json[pos] == '\r' ||
+                                      json[pos] == ','))
+            pos++;
+        if (pos >= json.size() || json[pos] == '}') break;
+
+        // Read tensor name key (skip it)
+        if (json[pos] != '"') break;
+        pos++;
+        while (pos < json.size() && json[pos] != '"') {
+            if (json[pos] == '\\') pos++;
+            pos++;
+        }
+        if (pos < json.size()) pos++;  // skip closing quote
+
+        // Skip colon
+        while (pos < json.size() && json[pos] != ':') pos++;
+        if (pos < json.size()) pos++;
+
+        // Skip whitespace
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' ||
+                                      json[pos] == '\n' || json[pos] == '\r'))
+            pos++;
+
+        // Read filename value
+        if (pos >= json.size() || json[pos] != '"') break;
+        pos++;
+        std::string fname;
+        while (pos < json.size() && json[pos] != '"') {
+            if (json[pos] == '\\' && pos + 1 < json.size()) {
+                pos++;
+                fname += json[pos];
+            } else {
+                fname += json[pos];
+            }
+            pos++;
+        }
+        if (pos < json.size()) pos++;  // skip closing quote
+
+        if (!fname.empty() && seen.find(fname) == seen.end()) {
+            seen[fname] = files.size();
+            files.push_back(dir + "/" + fname);
+        }
+    }
+
+    return files;
+}
+
 static inline std::vector<std::string> find_safetensors_files(const std::string& dir) {
     std::vector<std::string> files;
 
@@ -747,7 +911,14 @@ static inline std::vector<std::string> find_safetensors_files(const std::string&
         return files;
     }
 
-    // Try sharded files: model-00001-of-NNNNN.safetensors
+    // Try index file (standard HuggingFace sharded format)
+    std::string index_path = dir + "/model.safetensors.index.json";
+    if (file_exists(index_path)) {
+        files = find_safetensors_from_index(dir, index_path);
+        if (!files.empty()) return files;
+    }
+
+    // Fall back to enumerating sharded files: model-00001-of-NNNNN.safetensors
     for (int i = 1; i < 1000; i++) {
         char buf[64];
         snprintf(buf, sizeof(buf), "/model-%05d-of-", i);
