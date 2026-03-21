@@ -1040,10 +1040,15 @@ private:
         config.moe_intermediate_size = hf_config.moe_intermediate_size;
         config.shared_expert_intermediate_size = hf_config.shared_expert_intermediate_size;
 
-        // Set RoPE style for Qwen models
+        // Set RoPE style for specific model families
         std::string arch = config.architecture;
         if (arch == "qwen2" || arch == "qwen3" || arch == "qwen2moe" ||
             arch == "qwen35" || arch == "qwen35moe") {
+            config.rope_neox = true;
+        }
+        // GPT-NeoX, StableLM, Phi-2, StarCoder2 also use NeoX-style interleaved RoPE
+        if (arch == "gpt_neox" || arch == "stablelm" || arch == "phi2" ||
+            arch == "starcoder2") {
             config.rope_neox = true;
         }
 
@@ -1163,7 +1168,7 @@ private:
         std::unordered_map<std::string, std::pair<std::string, size_t>> gguf_to_hf;
         for (const auto& kv : safetensors.tensors) {
             std::string gguf_name = hf_to_gguf_tensor_name(kv.first);
-            gguf_to_hf[gguf_name] = {kv.first, 0};  // file_idx=0 for single file
+            gguf_to_hf[gguf_name] = {kv.first, kv.second.file_idx};
         }
 
         // Load embedding and output weights
@@ -1198,18 +1203,52 @@ private:
                 gguf_prefix + "attn_norm.weight", gguf_to_hf);
 
             if (!is_linear) {
-                // Standard attention layer
-                float* wq = load_hf_tensor(gguf_prefix + "attn_q.weight", gguf_to_hf);
-                if (wq) weights.layers[l].wq = {wq, GGML_TYPE_F32};
+                // Standard attention layer: try separate Q/K/V first, then combined QKV
+                float* wq = load_hf_tensor(gguf_prefix + "attn_q.weight", gguf_to_hf, true);
+                float* wk = load_hf_tensor(gguf_prefix + "attn_k.weight", gguf_to_hf, true);
+                float* wv = load_hf_tensor(gguf_prefix + "attn_v.weight", gguf_to_hf, true);
+                float* wo = load_hf_tensor(gguf_prefix + "attn_output.weight", gguf_to_hf, true);
 
-                float* wk = load_hf_tensor(gguf_prefix + "attn_k.weight", gguf_to_hf);
-                if (wk) weights.layers[l].wk = {wk, GGML_TYPE_F32};
-
-                float* wv = load_hf_tensor(gguf_prefix + "attn_v.weight", gguf_to_hf);
-                if (wv) weights.layers[l].wv = {wv, GGML_TYPE_F32};
-
-                float* wo = load_hf_tensor(gguf_prefix + "attn_output.weight", gguf_to_hf);
+                if (wq && wk && wv) {
+                    // Separate Q/K/V (LLaMA / Qwen / Mistral style)
+                    weights.layers[l].wq = {wq, GGML_TYPE_F32};
+                    weights.layers[l].wk = {wk, GGML_TYPE_F32};
+                    weights.layers[l].wv = {wv, GGML_TYPE_F32};
+                } else {
+                    // Combined QKV (Phi-3 / InternLM2 / GPT-NeoX / ChatGLM style)
+                    // Shape: [q_size + k_size + v_size, hidden_size]
+                    // q_size = num_heads * head_dim, k_size = v_size = kv_dim
+                    float* wqkv_combined = load_hf_tensor(gguf_prefix + "attn_qkv.weight",
+                                                           gguf_to_hf, true);
+                    if (wqkv_combined) {
+                        int q_size  = config.num_heads    * config.head_dim;
+                        int kv_size = config.num_kv_heads * config.head_dim;
+                        int dim     = config.hidden_size;
+                        // Allocate split tensors
+                        weight_storage.emplace_back(q_size  * dim);
+                        float* wq_split = weight_storage.back().data();
+                        weight_storage.emplace_back(kv_size * dim);
+                        float* wk_split = weight_storage.back().data();
+                        weight_storage.emplace_back(kv_size * dim);
+                        float* wv_split = weight_storage.back().data();
+                        // Split combined QKV: [Q rows, K rows, V rows] x hidden
+                        memcpy(wq_split, wqkv_combined,
+                               static_cast<size_t>(q_size)  * dim * sizeof(float));
+                        memcpy(wk_split, wqkv_combined + q_size  * dim,
+                               static_cast<size_t>(kv_size) * dim * sizeof(float));
+                        memcpy(wv_split, wqkv_combined + (q_size + kv_size) * dim,
+                               static_cast<size_t>(kv_size) * dim * sizeof(float));
+                        weights.layers[l].wq = {wq_split, GGML_TYPE_F32};
+                        weights.layers[l].wk = {wk_split, GGML_TYPE_F32};
+                        weights.layers[l].wv = {wv_split, GGML_TYPE_F32};
+                    }
+                }
                 if (wo) weights.layers[l].wo = {wo, GGML_TYPE_F32};
+                if (!wo) {
+                    // Retry output projection without early optional return
+                    wo = load_hf_tensor(gguf_prefix + "attn_output.weight", gguf_to_hf);
+                    if (wo) weights.layers[l].wo = {wo, GGML_TYPE_F32};
+                }
             } else {
                 // GatedDeltaNet linear attention layer
                 float* wqkv = load_hf_tensor(gguf_prefix + "attn_qkv.weight",
@@ -1269,26 +1308,31 @@ private:
             weights.layers[l].ffn_norm = load_hf_tensor(
                 gguf_prefix + "ffn_norm.weight", gguf_to_hf);
 
-            float* wg = load_hf_tensor(gguf_prefix + "ffn_gate.weight", gguf_to_hf);
+            float* wg = load_hf_tensor(gguf_prefix + "ffn_gate.weight", gguf_to_hf, true);
             if (wg) weights.layers[l].w_gate = {wg, GGML_TYPE_F32};
 
-            float* wu = load_hf_tensor(gguf_prefix + "ffn_up.weight", gguf_to_hf);
+            float* wu = load_hf_tensor(gguf_prefix + "ffn_up.weight", gguf_to_hf, true);
             if (wu) weights.layers[l].w_up = {wu, GGML_TYPE_F32};
 
-            float* wd = load_hf_tensor(gguf_prefix + "ffn_down.weight", gguf_to_hf);
+            // For models without a gated FFN (e.g. GPT-NeoX), map the single
+            // MLP projection onto w_gate so the forward path can use it.
+            if (!wg && wu) {
+                weights.layers[l].w_gate = weights.layers[l].w_up;
+            }
+
+            float* wd = load_hf_tensor(gguf_prefix + "ffn_down.weight", gguf_to_hf, true);
             if (wd) weights.layers[l].w_down = {wd, GGML_TYPE_F32};
 
             // Validate essential weights for standard attention layers
             if (!is_linear) {
-                if (!weights.layers[l].attn_norm ||
-                    !weights.layers[l].wq.valid() ||
-                    !weights.layers[l].wk.valid() ||
-                    !weights.layers[l].wv.valid() ||
-                    !weights.layers[l].wo.valid() ||
-                    !weights.layers[l].ffn_norm ||
-                    !weights.layers[l].w_gate.valid() ||
-                    !weights.layers[l].w_up.valid() ||
-                    !weights.layers[l].w_down.valid()) {
+                bool attn_ok = weights.layers[l].wq.valid() &&
+                               weights.layers[l].wk.valid() &&
+                               weights.layers[l].wv.valid();
+                bool ffn_ok  = weights.layers[l].w_gate.valid() &&
+                               weights.layers[l].w_down.valid();
+                if (!weights.layers[l].attn_norm || !attn_ok ||
+                    !weights.layers[l].wo.valid() || !weights.layers[l].ffn_norm ||
+                    !ffn_ok) {
                     fprintf(stderr, "Error: missing HF weights for layer %d\n", l);
                     return false;
                 }

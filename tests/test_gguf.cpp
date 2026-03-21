@@ -12,6 +12,7 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <sys/stat.h>
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #endif
@@ -2471,6 +2472,233 @@ void test_gated_delta_net_step() {
     PASS();
 }
 
+// ---- New HF loading tests ----
+
+void test_hf_multifile_file_idx() {
+    TEST(hf_multifile_file_idx);
+
+    // Verify that SafeTensorInfo stores the correct file_idx for each shard.
+    // Build two minimal SafeTensors buffers and load them via load_multi().
+
+    auto make_st_buf = [](const std::string& tensor_name,
+                          const std::vector<float>& data) {
+        std::string header =
+            "{\"" + tensor_name + "\": {\"dtype\": \"F32\", \"shape\": [" +
+            std::to_string(data.size()) + "], \"data_offsets\": [0, " +
+            std::to_string(data.size() * 4) + "]}}";
+        uint64_t hdr_len = header.size();
+        size_t total = 8 + hdr_len + data.size() * 4;
+        std::vector<uint8_t> buf(total, 0);
+        memcpy(buf.data(), &hdr_len, 8);
+        memcpy(buf.data() + 8, header.c_str(), hdr_len);
+        memcpy(buf.data() + 8 + hdr_len, data.data(), data.size() * 4);
+        return buf;
+    };
+
+    std::vector<float> d0 = {1.0f, 2.0f};
+    std::vector<float> d1 = {3.0f, 4.0f, 5.0f};
+    auto buf0 = make_st_buf("tensor_a", d0);
+    auto buf1 = make_st_buf("tensor_b", d1);
+
+    // Write to temp files
+    const char* p0 = "/tmp/test_shard0.safetensors";
+    const char* p1 = "/tmp/test_shard1.safetensors";
+    FILE* f = fopen(p0, "wb");
+    ASSERT_TRUE(f != nullptr);
+    fwrite(buf0.data(), 1, buf0.size(), f); fclose(f);
+    f = fopen(p1, "wb");
+    ASSERT_TRUE(f != nullptr);
+    fwrite(buf1.data(), 1, buf1.size(), f); fclose(f);
+
+    SafeTensorsFile st;
+    ASSERT_TRUE(st.load_multi({p0, p1}));
+
+    // tensor_a must be in file 0, tensor_b in file 1
+    auto it_a = st.tensors.find("tensor_a");
+    auto it_b = st.tensors.find("tensor_b");
+    ASSERT_TRUE(it_a != st.tensors.end());
+    ASSERT_TRUE(it_b != st.tensors.end());
+    ASSERT_EQ(it_a->second.file_idx, static_cast<size_t>(0));
+    ASSERT_EQ(it_b->second.file_idx, static_cast<size_t>(1));
+
+    // Verify get_tensor_data returns correct data for each shard
+    const void* ra = st.get_tensor_data(it_a->second, it_a->second.file_idx);
+    const void* rb = st.get_tensor_data(it_b->second, it_b->second.file_idx);
+    ASSERT_TRUE(ra != nullptr);
+    ASSERT_TRUE(rb != nullptr);
+    ASSERT_NEAR(static_cast<const float*>(ra)[0], 1.0f, 1e-6f);
+    ASSERT_NEAR(static_cast<const float*>(ra)[1], 2.0f, 1e-6f);
+    ASSERT_NEAR(static_cast<const float*>(rb)[0], 3.0f, 1e-6f);
+    ASSERT_NEAR(static_cast<const float*>(rb)[2], 5.0f, 1e-6f);
+
+    remove(p0); remove(p1);
+    PASS();
+}
+
+void test_hf_index_json_parsing() {
+    TEST(hf_index_json_parsing);
+
+    // Create a temporary directory structure with index.json
+    const char* dir = "/tmp/test_hf_index_dir";
+    mkdir(dir, 0755);
+
+    // Write two minimal safetensors shards
+    auto make_st_buf = [](const std::string& tname) {
+        std::string hdr = "{\"" + tname + "\": {\"dtype\": \"F32\", "
+                          "\"shape\": [2], \"data_offsets\": [0, 8]}}";
+        uint64_t hl = hdr.size();
+        std::vector<uint8_t> buf(8 + hl + 8, 0);
+        memcpy(buf.data(), &hl, 8);
+        memcpy(buf.data() + 8, hdr.c_str(), hl);
+        float v[2] = {1.0f, 2.0f};
+        memcpy(buf.data() + 8 + hl, v, 8);
+        return buf;
+    };
+
+    std::string f1 = std::string(dir) + "/model-00001-of-00002.safetensors";
+    std::string f2 = std::string(dir) + "/model-00002-of-00002.safetensors";
+    FILE* fp = fopen(f1.c_str(), "wb");
+    ASSERT_TRUE(fp != nullptr);
+    auto b1 = make_st_buf("embed.weight");
+    fwrite(b1.data(), 1, b1.size(), fp); fclose(fp);
+    fp = fopen(f2.c_str(), "wb");
+    ASSERT_TRUE(fp != nullptr);
+    auto b2 = make_st_buf("lm_head.weight");
+    fwrite(b2.data(), 1, b2.size(), fp); fclose(fp);
+
+    // Write index.json
+    std::string idx_path = std::string(dir) + "/model.safetensors.index.json";
+    const char* idx_json =
+        "{\n"
+        "  \"metadata\": {\"total_size\": 16},\n"
+        "  \"weight_map\": {\n"
+        "    \"embed.weight\": \"model-00001-of-00002.safetensors\",\n"
+        "    \"lm_head.weight\": \"model-00002-of-00002.safetensors\"\n"
+        "  }\n"
+        "}";
+    fp = fopen(idx_path.c_str(), "w");
+    ASSERT_TRUE(fp != nullptr);
+    fputs(idx_json, fp); fclose(fp);
+
+    // find_safetensors_files should use the index file
+    auto files = find_safetensors_files(dir);
+    ASSERT_EQ(static_cast<int>(files.size()), 2);
+    // First file should be shard 1 (embed.weight), second shard 2 (lm_head)
+    ASSERT_TRUE(files[0].find("00001") != std::string::npos);
+    ASSERT_TRUE(files[1].find("00002") != std::string::npos);
+
+    remove(f1.c_str()); remove(f2.c_str());
+    remove(idx_path.c_str()); rmdir(dir);
+    PASS();
+}
+
+void test_hf_new_weight_name_mappings() {
+    TEST(hf_new_weight_name_mappings);
+
+    // Phi-3 combined QKV
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.self_attn.qkv_proj.weight"),
+              std::string("blk.0.attn_qkv.weight"));
+
+    // Gemma2 / Gemma3 FFN norms
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.pre_feedforward_layernorm.weight"),
+              std::string("blk.0.ffn_norm.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.2.post_feedforward_layernorm.weight"),
+              std::string("blk.2.ffn_post_norm.weight"));
+
+    // InternLM2 top-level embedding/output
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.tok_embeddings.weight"),
+              std::string("token_embd.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("output.weight"),
+              std::string("output.weight"));
+
+    // InternLM2 layer tensors
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.attention_norm.weight"),
+              std::string("blk.0.attn_norm.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.ffn_norm.weight"),
+              std::string("blk.0.ffn_norm.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.attention.wqkv.weight"),
+              std::string("blk.0.attn_qkv.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.attention.wo.weight"),
+              std::string("blk.0.attn_output.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.feed_forward.w1.weight"),
+              std::string("blk.0.ffn_gate.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.feed_forward.w2.weight"),
+              std::string("blk.0.ffn_down.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("model.layers.0.feed_forward.w3.weight"),
+              std::string("blk.0.ffn_up.weight"));
+
+    // GPT-NeoX top-level names
+    ASSERT_EQ(hf_to_gguf_tensor_name("gpt_neox.embed_in.weight"),
+              std::string("token_embd.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("gpt_neox.final_layer_norm.weight"),
+              std::string("output_norm.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("embed_out.weight"),
+              std::string("output.weight"));
+
+    // GPT-NeoX layer tensors
+    ASSERT_EQ(hf_to_gguf_tensor_name("gpt_neox.layers.0.input_layernorm.weight"),
+              std::string("blk.0.attn_norm.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("gpt_neox.layers.0.post_attention_layernorm.weight"),
+              std::string("blk.0.ffn_norm.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name(
+                  "gpt_neox.layers.0.attention.query_key_value.weight"),
+              std::string("blk.0.attn_qkv.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("gpt_neox.layers.0.attention.dense.weight"),
+              std::string("blk.0.attn_output.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("gpt_neox.layers.0.mlp.dense_h_to_4h.weight"),
+              std::string("blk.0.ffn_up.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("gpt_neox.layers.0.mlp.dense_4h_to_h.weight"),
+              std::string("blk.0.ffn_down.weight"));
+
+    // ChatGLM top-level names
+    ASSERT_EQ(hf_to_gguf_tensor_name("transformer.embedding.word_embeddings.weight"),
+              std::string("token_embd.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("transformer.encoder.final_layernorm.weight"),
+              std::string("output_norm.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name("transformer.output_layer.weight"),
+              std::string("output.weight"));
+
+    // ChatGLM layer tensors
+    ASSERT_EQ(hf_to_gguf_tensor_name(
+                  "transformer.encoder.layers.0.self_attention.query_key_value.weight"),
+              std::string("blk.0.attn_qkv.weight"));
+    ASSERT_EQ(hf_to_gguf_tensor_name(
+                  "transformer.encoder.layers.0.self_attention.dense.weight"),
+              std::string("blk.0.attn_output.weight"));
+
+    PASS();
+}
+
+void test_hf_additional_architecture_mappings() {
+    TEST(hf_additional_architecture_mappings);
+
+    HFModelConfig cfg;
+
+    // Qwen2.5 uses the Qwen2 architecture
+    cfg.model_type = "qwen2_5";
+    ASSERT_EQ(cfg.get_architecture(), std::string("qwen2"));
+
+    // Mixtral uses the LLaMA base architecture
+    cfg.model_type = "mixtral";
+    ASSERT_EQ(cfg.get_architecture(), std::string("llama"));
+
+    // Phi-4
+    cfg.model_type = "phi4";
+    ASSERT_EQ(cfg.get_architecture(), std::string("phi4"));
+
+    // StableLM variants
+    cfg.model_type = "stablelm";
+    ASSERT_EQ(cfg.get_architecture(), std::string("stablelm"));
+    cfg.model_type = "stablelm_epoch";
+    ASSERT_EQ(cfg.get_architecture(), std::string("stablelm"));
+
+    // Gemma3n
+    cfg.model_type = "gemma3n";
+    ASSERT_EQ(cfg.get_architecture(), std::string("gemma3n"));
+
+    PASS();
+}
+
 void test_clear_state() {
     TEST(clear_state);
 
@@ -2588,6 +2816,12 @@ int main() {
     test_moe_weight_name_mapping();
     test_partial_rotary_factor();
     test_expanded_architecture_mappings();
+
+    fprintf(stderr, "\nHF training format loading tests:\n");
+    test_hf_multifile_file_idx();
+    test_hf_index_json_parsing();
+    test_hf_new_weight_name_mappings();
+    test_hf_additional_architecture_mappings();
 
     fprintf(stderr, "\nGatedDeltaNet linear attention tests:\n");
     test_linear_attention_state();
