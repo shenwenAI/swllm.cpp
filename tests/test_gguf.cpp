@@ -1594,6 +1594,97 @@ void test_dequantize_q2_k() {
     PASS();
 }
 
+// Build a Q5_0 block (22 bytes) with:
+//   d=1.0, qh=all zeros, qs=all 0x55 → nibble lo=5, nibble hi=5
+//   high bits all zero → 5-bit value = 5, output = (5 - 16) * 1.0 = -11.0
+void test_dequantize_q5_0() {
+    TEST(dequantize_q5_0);
+
+    std::vector<uint8_t> blk(22, 0);
+    // d at [0..1]: 1.0 in f16 = 0x3C00
+    uint16_t d16 = 0x3C00;
+    memcpy(blk.data(), &d16, 2);
+    // qh at [2..5]: all zeros (no high bits set)
+    // qs at [6..21]: all 0x55 → lo nibble = 5, hi nibble = 5
+    for (int i = 6; i < 22; i++) blk[i] = 0x55;
+
+    std::vector<float> out(32, 0.0f);
+    dequantize_q5_0(blk.data(), out.data(), 32);
+
+    // All 5-bit values = 5, output = (5 - 16) * 1.0 = -11.0
+    for (int i = 0; i < 32; i++) {
+        ASSERT_NEAR(out[i], -11.0f, 1e-4f);
+    }
+
+    // Cross-check via generic dequantize dispatch
+    std::vector<float> out2(32, 0.0f);
+    dequantize(blk.data(), out2.data(), 32, GGML_TYPE_Q5_0);
+    for (int i = 0; i < 32; i++) {
+        ASSERT_NEAR(out2[i], out[i], 1e-6f);
+    }
+
+    PASS();
+}
+
+// Build a Q5_0 block with high bits set to verify 5th bit decoding
+void test_dequantize_q5_0_high_bits() {
+    TEST(dequantize_q5_0_high_bits);
+
+    std::vector<uint8_t> blk(22, 0);
+    // d at [0..1]: 1.0 in f16 = 0x3C00
+    uint16_t d16 = 0x3C00;
+    memcpy(blk.data(), &d16, 2);
+    // qh at [2..5]: all 0xFF (all high bits set)
+    for (int i = 2; i < 6; i++) blk[i] = 0xFF;
+    // qs at [6..21]: all zeros → lo nibble = 0, hi nibble = 0
+    // With high bits set: 5-bit value = 16, output = (16 - 16) * 1.0 = 0.0
+
+    std::vector<float> out(32, 1.0f); // initialise to non-zero
+    dequantize_q5_0(blk.data(), out.data(), 32);
+
+    for (int i = 0; i < 32; i++) {
+        ASSERT_NEAR(out[i], 0.0f, 1e-4f);
+    }
+
+    PASS();
+}
+
+// Build a Q5_K block (176 bytes) with:
+//   d=1.0, dmin=0.0, scales[0..3]=1 (→ sc=1,m=0 for groups 0-3)
+//   qh=all zeros, qs=all 0x55 → nibble 5, no high bit → value 5
+//   output = 1.0 * 5 - 0 = 5.0 (for groups 0-3)
+void test_dequantize_q5_k() {
+    TEST(dequantize_q5_k);
+
+    std::vector<uint8_t> blk(176, 0);
+    // d at [0..1]: 1.0 in f16 = 0x3C00
+    uint16_t d16 = 0x3C00, dmin16 = 0x0000; // dmin = 0.0
+    memcpy(blk.data() + 0, &d16,    2);
+    memcpy(blk.data() + 2, &dmin16, 2);
+    // scales at [4..15]: set scales[0..3]=1 → groups 0-3 get sc=1,m=0
+    blk[4] = 1; blk[5] = 1; blk[6] = 1; blk[7] = 1;
+    // qh at [16..47]: all zeros (no high bits)
+    // qs at [48..175]: all 0x55 → nibbles = 5 each
+    for (int i = 48; i < 176; i++) blk[i] = 0x55;
+
+    std::vector<float> out(256, 0.0f);
+    dequantize_q5_k(blk.data(), out.data(), 256);
+
+    // Groups 0-3 (first 128 elements): sc=1, d=1.0, nibble=5, qh=0, dmin=0 → 1.0*5-0=5.0
+    for (int i = 0; i < 128; i++) {
+        ASSERT_NEAR(out[i], 5.0f, 1e-4f);
+    }
+
+    // Cross-check via generic dequantize dispatch
+    std::vector<float> out2(256, 0.0f);
+    dequantize(blk.data(), out2.data(), 256, GGML_TYPE_Q5_K);
+    for (int i = 0; i < 256; i++) {
+        ASSERT_NEAR(out2[i], out[i], 1e-6f);
+    }
+
+    PASS();
+}
+
 // Test fused Q6_K matmul: dequantize+accumulate vs dequantize-then-matmul
 void test_cpu_matmul_transposed_q6_k() {
     TEST(cpu_matmul_transposed_q6_k);
@@ -1676,6 +1767,87 @@ void test_cpu_matmul_transposed_q4_k() {
     PASS();
 }
 
+// Test fused Q5_K matmul: dequantize+accumulate vs dequantize-then-matmul
+void test_cpu_matmul_transposed_q5_k() {
+    TEST(cpu_matmul_transposed_q5_k);
+
+    // Build a 2-row weight matrix in Q5_K format (K=256, N=2).
+    // Same setup as test_dequantize_q5_k: d=1.0, dmin=0, scales[0..3]=1,
+    // qh=0, qs = all 0x55 (nibble 5).
+    const int N = 2, K = 256;
+    const size_t block_bytes = 176;
+
+    std::vector<uint8_t> w(N * block_bytes, 0);
+    for (int row = 0; row < N; row++) {
+        uint8_t* blk = w.data() + row * block_bytes;
+        uint16_t d16 = 0x3C00, dmin16 = 0x0000;
+        memcpy(blk + 0, &d16,    2);
+        memcpy(blk + 2, &dmin16, 2);
+        blk[4] = 1; blk[5] = 1; blk[6] = 1; blk[7] = 1;
+        for (int i = 48; i < 176; i++) blk[i] = 0x55;
+    }
+
+    // Input: x = all 1.0
+    std::vector<float> x(K, 1.0f);
+    float out_fused[2] = {};
+    cpu_matmul_transposed_q5_k(out_fused, x.data(), w.data(), N, K);
+
+    // Cross-check: dequantize then F32 matmul
+    std::vector<float> w_f32(static_cast<size_t>(N) * K);
+    for (int row = 0; row < N; row++) {
+        dequantize_q5_k(w.data() + row * block_bytes,
+                        w_f32.data() + row * K, K);
+    }
+    float out_ref[2] = {};
+    cpu_matmul_transposed(out_ref, x.data(), w_f32.data(), N, K);
+
+    ASSERT_NEAR(out_fused[0], out_ref[0], 1e-3f);
+    ASSERT_NEAR(out_fused[1], out_ref[1], 1e-3f);
+
+    PASS();
+}
+
+// Test fused Q5_0 matmul: dequantize+accumulate vs dequantize-then-matmul
+void test_cpu_matmul_transposed_q5_0() {
+    TEST(cpu_matmul_transposed_q5_0);
+
+    // Build a 2-row weight matrix in Q5_0 format (K=32, N=2).
+    // d=1.0, qh=0, qs=all 0x55 (nibble 5, no high bit → value 5)
+    // → dequantized = (5-16)*1.0 = -11.0
+    const int N = 2, K = 32;
+    const int bytes_per_block = 22;
+
+    std::vector<uint8_t> w(N * bytes_per_block, 0);
+    for (int row = 0; row < N; row++) {
+        uint8_t* blk = w.data() + row * bytes_per_block;
+        uint16_t d16 = 0x3C00;
+        memcpy(blk, &d16, 2);
+        // qh at [2..5]: zeros
+        // qs at [6..21]: all 0x55
+        for (int i = 6; i < 22; i++) blk[i] = 0x55;
+    }
+
+    // Input: x = all 1.0 → dot product = 32 * (-11) = -352
+    std::vector<float> x(K, 1.0f);
+    float out_fused[2] = {};
+    cpu_matmul_transposed_q5_0(out_fused, x.data(), w.data(), N, K);
+
+    // Cross-check: dequantize then F32 matmul
+    std::vector<float> w_f32(static_cast<size_t>(N) * K);
+    for (int row = 0; row < N; row++) {
+        dequantize_q5_0(w.data() + row * bytes_per_block,
+                        w_f32.data() + row * K, K);
+    }
+    float out_ref[2] = {};
+    cpu_matmul_transposed(out_ref, x.data(), w_f32.data(), N, K);
+
+    ASSERT_NEAR(out_fused[0], out_ref[0], 1e-3f);
+    ASSERT_NEAR(out_fused[1], out_ref[1], 1e-3f);
+    ASSERT_NEAR(out_fused[0], -352.0f, 1e-1f);
+
+    PASS();
+}
+
 // Test that the Compute dispatcher routes Q6_K/Q4_K to fused kernels
 void test_compute_q_kquant_dispatch() {
     TEST(compute_q_kquant_dispatch);
@@ -1715,6 +1887,38 @@ void test_compute_q_kquant_dispatch() {
     float out4_fused = 0.0f;
     cpu_matmul_transposed_q4_k(&out4_fused, x.data(), w4.data(), 1, K);
     ASSERT_NEAR(out4_dispatch, out4_fused, 1e-6f);
+
+    // Test Q5_K dispatch
+    const size_t q5k_block_bytes = 176;
+    std::vector<uint8_t> w5k(q5k_block_bytes, 0);
+    memcpy(w5k.data() + 0, &d16, 2);
+    memcpy(w5k.data() + 2, &dmin16, 2);
+    w5k[4] = 1; w5k[5] = 1; w5k[6] = 1; w5k[7] = 1;
+    for (int i = 48; i < 176; i++) w5k[i] = 0x55;
+
+    float out5k_dispatch = 0.0f;
+    QuantWeight qw5k = {w5k.data(), GGML_TYPE_Q5_K};
+    compute.matmul_transposed_q(&out5k_dispatch, x.data(), qw5k, 1, K);
+
+    float out5k_fused = 0.0f;
+    cpu_matmul_transposed_q5_k(&out5k_fused, x.data(), w5k.data(), 1, K);
+    ASSERT_NEAR(out5k_dispatch, out5k_fused, 1e-6f);
+
+    // Test Q5_0 dispatch (K=32 for Q5_0)
+    const int K5 = 32;
+    const int q5_block_bytes = 22;
+    std::vector<uint8_t> w50(q5_block_bytes, 0);
+    memcpy(w50.data(), &d16, 2);
+    for (int i = 6; i < 22; i++) w50[i] = 0x55;
+
+    std::vector<float> x5(K5, 1.0f);
+    float out50_dispatch = 0.0f;
+    QuantWeight qw50 = {w50.data(), GGML_TYPE_Q5_0};
+    compute.matmul_transposed_q(&out50_dispatch, x5.data(), qw50, 1, K5);
+
+    float out50_fused = 0.0f;
+    cpu_matmul_transposed_q5_0(&out50_fused, x5.data(), w50.data(), 1, K5);
+    ASSERT_NEAR(out50_dispatch, out50_fused, 1e-6f);
 
     PASS();
 }
@@ -2798,10 +3002,15 @@ int main() {
     test_dequantize_q6_k();
     test_dequantize_q4_k();
     test_dequantize_q2_k();
+    test_dequantize_q5_0();
+    test_dequantize_q5_0_high_bits();
+    test_dequantize_q5_k();
 
     fprintf(stderr, "\nFused K-quant matmul tests:\n");
     test_cpu_matmul_transposed_q6_k();
     test_cpu_matmul_transposed_q4_k();
+    test_cpu_matmul_transposed_q5_k();
+    test_cpu_matmul_transposed_q5_0();
     test_compute_q_kquant_dispatch();
 
     fprintf(stderr, "\nSafeTensors and HF loader tests:\n");
