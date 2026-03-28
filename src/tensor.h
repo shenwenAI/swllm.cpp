@@ -169,6 +169,29 @@ inline void dequantize_q8_0(const void* src, float* dst, int64_t n) {
     }
 }
 
+// Dequantize Q5_0 block: 32 elements stored as 1 f16 scale + 4 bytes high bits + 16 bytes of nibbles
+inline void dequantize_q5_0(const void* src, float* dst, int64_t n) {
+    const uint8_t* data = static_cast<const uint8_t*>(src);
+    const int bytes_per_block = 22; // 2 + 4 + 16
+    int64_t num_blocks = n / 32;
+    for (int64_t b = 0; b < num_blocks; b++) {
+        const uint8_t* blk = data + b * bytes_per_block;
+        uint16_t scale_h;
+        memcpy(&scale_h, blk, 2);
+        float scale = fp16_to_fp32(scale_h);
+        uint32_t qh;
+        memcpy(&qh, blk + 2, 4);
+        const uint8_t* qs = blk + 6;
+        for (int j = 0; j < 16; j++) {
+            uint8_t byte = qs[j];
+            int x0 = (byte & 0x0F) | (((qh >> j)        & 1) << 4);
+            int x1 = (byte >> 4)    | (((qh >> (j + 16)) & 1) << 4);
+            dst[b * 32 + j]      = (static_cast<float>(x0) - 16.0f) * scale;
+            dst[b * 32 + j + 16] = (static_cast<float>(x1) - 16.0f) * scale;
+        }
+    }
+}
+
 // Convert F16 array to F32
 inline void dequantize_f16(const void* src, float* dst, int64_t n) {
     const uint16_t* data = static_cast<const uint16_t*>(src);
@@ -439,6 +462,9 @@ inline void dequantize(const void* src, float* dst, int64_t n, GGMLType type) {
         case GGML_TYPE_Q4_0:
             dequantize_q4_0(src, dst, n);
             break;
+        case GGML_TYPE_Q5_0:
+            dequantize_q5_0(src, dst, n);
+            break;
         case GGML_TYPE_Q8_0:
             dequantize_q8_0(src, dst, n);
             break;
@@ -605,6 +631,45 @@ inline void cpu_matmul_transposed_q4_0(float* out, const float* x,
                 // 8 so that the represented range is [-8, 7].
                 block_sum += xb[j]      * static_cast<float>(static_cast<int>(byte & 0x0F) - 8);
                 block_sum += xb[j + 16] * static_cast<float>(static_cast<int>(byte >> 4)  - 8);
+            }
+            sum += block_sum * scale;
+            row += bytes_per_block;
+        }
+        out[i] = sum;
+    }
+}
+
+// Fused Q5_0 dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is in Q5_0 format: 32-element blocks, each block = d_f16(2)+qh(4)+qs(16) = 22 bytes.
+// Each element is a 5-bit unsigned integer (4-bit nibble + 1 high bit) offset by 16.
+// The fused kernel avoids materializing an N×K F32 temp buffer.
+inline void cpu_matmul_transposed_q5_0(float* out, const float* x,
+                                       const void* w, int N, int K) {
+    const int bytes_per_block = 22; // 2-byte f16 scale + 4 high-bit bytes + 16 nibble bytes
+    const int blocks_per_row = K / 32;
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint8_t* row = wptr +
+            static_cast<size_t>(i) * blocks_per_row * bytes_per_block;
+        for (int b = 0; b < blocks_per_row; b++) {
+            uint16_t scale_h;
+            memcpy(&scale_h, row, 2);
+            float scale = fp16_to_fp32(scale_h);
+            uint32_t qh;
+            memcpy(&qh, row + 2, 4);
+            const uint8_t* qs = row + 6;
+            const float* xb = x + b * 32;
+            float block_sum = 0.0f;
+            for (int j = 0; j < 16; j++) {
+                uint8_t byte = qs[j];
+                int x0 = (byte & 0x0F) | (((qh >> j)        & 1) << 4);
+                int x1 = (byte >> 4)    | (((qh >> (j + 16)) & 1) << 4);
+                block_sum += xb[j]      * static_cast<float>(x0 - 16);
+                block_sum += xb[j + 16] * static_cast<float>(x1 - 16);
             }
             sum += block_sum * scale;
             row += bytes_per_block;
@@ -784,6 +849,55 @@ inline void cpu_matmul_transposed_q4_k(float* out, const float* x,
                     sum += (d1 * (q[l] & 0xF) - m1) * xj[l];
                     sum += (d2 * (q[l] >>  4) - m2) * xj[l + 32];
                 }
+            }
+        }
+        out[i] = sum;
+    }
+}
+
+// Fused Q5_K dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is in Q5_K format: 256-element blocks, each block = d_f16(2)+dmin_f16(2)+scales(12)+qh(32)+qs(128) = 176 bytes.
+// Each element is a 5-bit unsigned integer (4-bit nibble + 1 high bit) multiplied by a per-64-element
+// scale and offset by a per-64-element minimum.
+// The fused kernel avoids materializing an N×K F32 temp buffer.
+inline void cpu_matmul_transposed_q5_k(float* out, const float* x,
+                                        const void* w, int N, int K) {
+    const size_t block_bytes = 176;
+    const int QK = 256;
+    const int blocks_per_row = K / QK;
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint8_t* row = wptr + static_cast<size_t>(i) * blocks_per_row * block_bytes;
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t* blk = row + b * block_bytes;
+            uint16_t d_h, dmin_h;
+            memcpy(&d_h,    blk,     2);
+            memcpy(&dmin_h, blk + 2, 2);
+            float d    = fp16_to_fp32(d_h);
+            float dmin = fp16_to_fp32(dmin_h);
+            const uint8_t* scales = blk + 4;
+            const uint8_t* qh     = blk + 16;
+            const uint8_t* ql     = blk + 48;
+            const float* xb = x + b * QK;
+            int is = 0;
+            uint8_t u1 = 1, u2 = 2;
+            for (int j = 0; j < QK; j += 64) {
+                uint8_t sc, m;
+                get_scale_min_k4(is++, scales, sc, m);
+                float d1 = d * sc, m1 = dmin * m;
+                get_scale_min_k4(is++, scales, sc, m);
+                float d2 = d * sc, m2 = dmin * m;
+                const uint8_t* q = ql + (j >> 1);
+                const float* xj = xb + j;
+                for (int l = 0; l < 32; l++) {
+                    sum += (d1 * ((q[l] & 0xF) + (qh[l] & u1 ? 16 : 0)) - m1) * xj[l];
+                    sum += (d2 * ((q[l] >>  4) + (qh[l] & u2 ? 16 : 0)) - m2) * xj[l + 32];
+                }
+                u1 <<= 2; u2 <<= 2;
             }
         }
         out[i] = sum;
@@ -1008,6 +1122,9 @@ struct Compute {
             case GGML_TYPE_Q4_0:
                 cpu_matmul_transposed_q4_0(out, x, w.data, N, K);
                 break;
+            case GGML_TYPE_Q5_0:
+                cpu_matmul_transposed_q5_0(out, x, w.data, N, K);
+                break;
             case GGML_TYPE_F8_E4M3:
                 cpu_matmul_transposed_f8_e4m3(out, x, w.data, N, K);
                 break;
@@ -1019,6 +1136,9 @@ struct Compute {
                 break;
             case GGML_TYPE_Q4_K:
                 cpu_matmul_transposed_q4_k(out, x, w.data, N, K);
+                break;
+            case GGML_TYPE_Q5_K:
+                cpu_matmul_transposed_q5_k(out, x, w.data, N, K);
                 break;
             default: {
                 // Generic fallback for other quantized types
