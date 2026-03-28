@@ -1,13 +1,4 @@
 ---
-AIGC:
-    ContentProducer: Minimax Agent AI
-    ContentPropagator: Minimax Agent AI
-    Label: AIGC
-    ProduceID: 50ea30ecb618107c2ed5a1902fa51584
-    PropagateID: 50ea30ecb618107c2ed5a1902fa51584
-    ReservedCode1: 3046022100ccd3228d696c78a270c9bd1b699fe128d72bc76b864aca8617d874b74bdde497022100ebdc9a690c7b0d16e68aedfbd6053c27b5e75bf407741494a94511a27801a201
-    ReservedCode2: 30460221008b488c487ed69040d4fc5bf8acfbf6bdcb6be32552bf893ad3b3b4964b873a7702210099d6264f63881f0d270e396526ce05f37cb9b505c353de6023a35930c98e281b
----
 
 # swllm.cpp
 
