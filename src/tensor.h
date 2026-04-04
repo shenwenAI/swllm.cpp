@@ -904,6 +904,126 @@ inline void cpu_matmul_transposed_q5_k(float* out, const float* x,
     }
 }
 
+// Fused Q2_K dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is in Q2_K format: 256-element blocks, each block = scales(16)+qs(64)+d_f16(2)+dmin_f16(2) = 84 bytes.
+// Each element is a 2-bit unsigned integer (0-3) multiplied by a per-16-element scale and offset by
+// a global block minimum.
+// The fused kernel avoids materializing an N×K F32 temp buffer.
+inline void cpu_matmul_transposed_q2_k(float* out, const float* x,
+                                        const void* w, int N, int K) {
+    const size_t block_bytes = 84;
+    const int QK = 256;
+    const int blocks_per_row = K / QK;
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint8_t* row = wptr + static_cast<size_t>(i) * blocks_per_row * block_bytes;
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t* blk = row + b * block_bytes;
+            const uint8_t* sc  = blk;
+            const uint8_t* qs  = blk + 16;
+            uint16_t d_h, dmin_h;
+            memcpy(&d_h,    blk + 80, 2);
+            memcpy(&dmin_h, blk + 82, 2);
+            float d    = fp16_to_fp32(d_h);
+            float dmin = fp16_to_fp32(dmin_h);
+            const float* xb = x + b * QK;
+            const uint8_t* q = qs;
+            int is = 0;
+            for (int n_ = 0; n_ < QK; n_ += 128) {
+                int shift = 0;
+                for (int j = 0; j < 4; j++) {
+                    uint8_t sc0 = sc[is++];
+                    float dl = d * (sc0 & 0xF), ml = dmin * (sc0 >> 4);
+                    for (int l = 0; l < 16; l++) {
+                        int v = (q[l] >> shift) & 3;
+                        sum += (dl * v - ml) * xb[n_ + l];
+                    }
+                    uint8_t sc1 = sc[is++];
+                    dl = d * (sc1 & 0xF); ml = dmin * (sc1 >> 4);
+                    for (int l = 0; l < 16; l++) {
+                        int v = (q[l+16] >> shift) & 3;
+                        sum += (dl * v - ml) * xb[n_ + l + 16];
+                    }
+                    shift += 2;
+                    if (shift == 8) { shift = 0; q += 32; }
+                }
+            }
+        }
+        out[i] = sum;
+    }
+}
+
+// Fused Q3_K dequantize + transposed matmul: out[N] = x[K] · W[N×K]
+// W is in Q3_K format: 256-element blocks, each block = hmask(32)+qs(64)+scales(12)+d_f16(2) = 110 bytes.
+// Each element is a 3-bit signed integer (offset by 4) multiplied by a per-16-element scale.
+// The fused kernel avoids materializing an N×K F32 temp buffer.
+inline void cpu_matmul_transposed_q3_k(float* out, const float* x,
+                                        const void* w, int N, int K) {
+    const size_t block_bytes = 110;
+    const int QK = 256;
+    const int blocks_per_row = K / QK;
+    const uint8_t* wptr = static_cast<const uint8_t*>(w);
+    #ifdef LLM_USE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        const uint8_t* row = wptr + static_cast<size_t>(i) * blocks_per_row * block_bytes;
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t* blk  = row + b * block_bytes;
+            const uint8_t* hm   = blk;
+            const uint8_t* qs   = blk + 32;
+            const uint8_t* sc   = blk + 96;
+            uint16_t d_h;
+            memcpy(&d_h, blk + 108, 2);
+            float d = fp16_to_fp32(d_h);
+            const float* xb = x + b * QK;
+            // Unpack 16 × 6-bit signed scales from 12 bytes
+            const uint32_t kmask1 = 0x03030303u;
+            uint32_t tmp[3];
+            memcpy(tmp, sc, 12);
+            int8_t scales_i8[16];
+            {
+                uint32_t a0 = ((tmp[0]     ) & kmask1) | (((tmp[2]     ) & kmask1) << 4);
+                uint32_t a1 = (((tmp[0]>>2)) & kmask1) | (((tmp[2]>>2) ) & kmask1) << 4;
+                uint32_t a2 = ((tmp[1]     ) & kmask1) | (((tmp[2]>>4) ) & kmask1) << 4;
+                uint32_t a3 = (((tmp[1]>>2)) & kmask1) | (((tmp[2]>>6) ) & kmask1) << 4;
+                uint32_t sub = 0x20202020u;
+                a0 -= sub; a1 -= sub; a2 -= sub; a3 -= sub;
+                memcpy(scales_i8 +  0, &a0, 4);
+                memcpy(scales_i8 +  4, &a1, 4);
+                memcpy(scales_i8 +  8, &a2, 4);
+                memcpy(scales_i8 + 12, &a3, 4);
+            }
+            const uint8_t* q = qs;
+            uint8_t m = 1;
+            for (int n_ = 0; n_ < QK; n_ += 128) {
+                int sc_off = (n_ == 0) ? 0 : 8;
+                int shift = 0;
+                for (int j = 0; j < 4; j++) {
+                    float dl0 = d * scales_i8[sc_off + j*2 + 0];
+                    float dl1 = d * scales_i8[sc_off + j*2 + 1];
+                    int base = n_ + j * 32;
+                    for (int l = 0; l < 16; l++) {
+                        int v0 = ((q[l]    >> shift) & 3) - (hm[l]    & m ? 0 : 4);
+                        int v1 = ((q[l+16] >> shift) & 3) - (hm[l+16] & m ? 0 : 4);
+                        sum += dl0 * v0 * xb[base + l];
+                        sum += dl1 * v1 * xb[base + l + 16];
+                    }
+                    shift += 2;
+                    if (shift == 8) { shift = 0; q += 32; }
+                    m <<= 1;
+                }
+            }
+        }
+        out[i] = sum;
+    }
+}
+
 // RMS normalization: out = x * w / rms(x)
 inline void cpu_rmsnorm(float* out, const float* x, const float* w, int n, float eps) {
     float ss = 0.0f;
@@ -1139,6 +1259,12 @@ struct Compute {
                 break;
             case GGML_TYPE_Q5_K:
                 cpu_matmul_transposed_q5_k(out, x, w.data, N, K);
+                break;
+            case GGML_TYPE_Q2_K:
+                cpu_matmul_transposed_q2_k(out, x, w.data, N, K);
+                break;
+            case GGML_TYPE_Q3_K:
+                cpu_matmul_transposed_q3_k(out, x, w.data, N, K);
                 break;
             default: {
                 // Generic fallback for other quantized types
