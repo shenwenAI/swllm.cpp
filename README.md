@@ -1,3 +1,10 @@
+<!-- Language Selector -->
+<div align="center">
+
+[🇺🇸 English](README.md) | [🇨🇳 简体中文](README_zh_CN.md)
+
+</div>
+
 # swllm.cpp
 
 A lightweight, high-performance LLM (Large Language Model) inference engine written in C++ with multi-platform GPU acceleration (CUDA, ROCm, Intel GPU) and CPU-only support. Designed for efficient local deployment of LLMs with minimal dependencies.
@@ -526,6 +533,25 @@ This project is licensed under the [GPL-3.0 License](LICENSE).
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Connect With Us
+
+Stay updated with the latest developments, model releases, and community discussions:
+
+<div align="center">
+
+[![GitHub][github-badge]][github-link]
+[![Hugging Face][hf-badge]][hf-link]
+[![Twitter][twitter-badge]][twitter-link]
+
+[github-badge]: https://img.shields.io/badge/GitHub-shenwenAI-181717?style=for-the-badge&logo=github
+[github-link]: https://github.com/shenwenAI
+[hf-badge]: https://img.shields.io/badge/Hugging_Face-shenwenAI-fcd022?style=for-the-badge&logo=huggingface
+[hf-link]: https://huggingface.co/shenwenAI
+[twitter-badge]: https://img.shields.io/badge/Twitter-@shenwenai-1DA1F2?style=for-the-badge&logo=twitter
+[twitter-link]: https://x.com/shenwenai
+
+</div>
 
 ## Acknowledgments
 
