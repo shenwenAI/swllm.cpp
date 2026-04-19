@@ -1,11 +1,14 @@
 #ifdef LLM_USE_CUDA
 
 // CUDA GPU kernels for LLM inference operations.
+// Optimized for high-throughput inference with persistent memory management.
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cstdio>
 #include <cmath>
+#include <vector>
+#include <memory>
 
 #define CUDA_CHECK(err) do { \
     cudaError_t err_ = (err); \
@@ -15,6 +18,123 @@
         exit(1); \
     } \
 } while(0)
+
+// ---- GPU memory pool for efficient allocation ----
+
+class CUDAMemoryPool {
+public:
+    static CUDAMemoryPool& instance() {
+        static CUDAMemoryPool pool;
+        return pool;
+    }
+
+    void* allocate(size_t size) {
+        // Round up to 256-byte alignment
+        size_t aligned_size = ((size + 255) / 256) * 256;
+        
+        // Try to find a suitable free block
+        for (auto it = free_blocks_.begin(); it != free_blocks_.end(); ++it) {
+            if (it->second >= aligned_size) {
+                void* ptr = it->first;
+                free_blocks_.erase(it);
+                used_blocks_[ptr] = aligned_size;
+                return ptr;
+            }
+        }
+        
+        // Allocate new block
+        void* ptr;
+        CUDA_CHECK(cudaMalloc(&ptr, aligned_size));
+        used_blocks_[ptr] = aligned_size;
+        return ptr;
+    }
+
+    void deallocate(void* ptr) {
+        if (!ptr) return;
+        auto it = used_blocks_.find(ptr);
+        if (it != used_blocks_.end()) {
+            free_blocks_[ptr] = it->second;
+            used_blocks_.erase(it);
+        }
+    }
+
+    void clear() {
+        for (auto& block : used_blocks_) {
+            cudaFree(block.first);
+        }
+        used_blocks_.clear();
+        free_blocks_.clear();
+    }
+
+private:
+    CUDAMemoryPool() = default;
+    ~CUDAMemoryPool() { clear(); }
+    
+    std::unordered_map<void*, size_t> used_blocks_;
+    std::unordered_map<void*, size_t> free_blocks_;
+};
+
+// Helper functions for pooled memory allocation
+inline void* cuda_malloc_pooled(size_t size) {
+    return CUDAMemoryPool::instance().allocate(size);
+}
+
+inline void cuda_free_pooled(void* ptr) {
+    CUDAMemoryPool::instance().deallocate(ptr);
+}
+
+// ---- Persistent weight storage on GPU ----
+
+struct GPUWeightCache {
+    void* d_data = nullptr;
+    size_t size = 0;
+    bool is_cached = false;
+    
+    void cache(const void* h_data, size_t bytes) {
+        if (is_cached && size == bytes) {
+            CUDA_CHECK(cudaMemcpy(d_data, h_data, bytes, cudaMemcpyHostToDevice));
+        } else {
+            release();
+            size = bytes;
+            CUDA_CHECK(cudaMalloc(&d_data, bytes));
+            CUDA_CHECK(cudaMemcpy(d_data, h_data, bytes, cudaMemcpyHostToDevice));
+            is_cached = true;
+        }
+    }
+    
+    void release() {
+        if (d_data) {
+            cudaFree(d_data);
+            d_data = nullptr;
+        }
+        size = 0;
+        is_cached = false;
+    }
+};
+
+// Global weight cache (keyed by tensor pointer)
+static std::unordered_map<const void*, GPUWeightCache> g_weight_cache;
+
+inline void* get_cached_weight(const void* h_ptr, size_t bytes) {
+    auto& cache = g_weight_cache[h_ptr];
+    if (!cache.is_cached || cache.size != bytes) {
+        cache.cache(h_ptr, bytes);
+    } else {
+        // Update cache in case weights changed
+        CUDA_CHECK(cudaMemcpy(cache.d_data, h_ptr, bytes, cudaMemcpyHostToDevice));
+    }
+    return cache.d_data;
+}
+
+// ---- CUDA streams for asynchronous execution ----
+
+static cudaStream_t compute_stream = nullptr;
+
+static void ensure_stream() {
+    if (!compute_stream) {
+        CUDA_CHECK(cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking));
+    }
+}
 
 // ---- GPU availability check ----
 
@@ -56,66 +176,58 @@ static cublasHandle_t cublas_handle = nullptr;
 static void ensure_cublas() {
     if (!cublas_handle) {
         cublasCreate(&cublas_handle);
+        cublasSetStream(cublas_handle, compute_stream);
     }
 }
 
-// ---- Matrix multiplication using cuBLAS ----
-
-void cuda_matmul(float* out, const float* a, const float* b, int M, int N, int K) {
-    ensure_cublas();
-
-    float *d_a, *d_b, *d_out;
-    CUDA_CHECK(cudaMalloc(&d_a, M * K * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_b, K * N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_out, M * N * sizeof(float)));
-
-    CUDA_CHECK(cudaMemcpy(d_a, a, M * K * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b, b, K * N * sizeof(float), cudaMemcpyHostToDevice));
-
-    float alpha = 1.0f, beta = 0.0f;
-    // cuBLAS uses column-major, so we compute B^T * A^T = (A*B)^T
-    cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                N, M, K, &alpha, d_b, N, d_a, K, &beta, d_out, N);
-
-    CUDA_CHECK(cudaMemcpy(out, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost));
-
-    cudaFree(d_a);
-    cudaFree(d_b);
-    cudaFree(d_out);
-}
+// ---- Optimized matrix multiplication using cuBLAS with persistent memory ----
 
 // Compute out[1×N] = x[1×K] × W^T where W is row-major [N×K].
-// This is the transposed-weight matmul used for all projection layers.
-// cuBLAS CUBLAS_OP_T on W (passed as column-major [K×N]) produces W^T [N×K].
+// Uses persistent GPU memory for weights to avoid repeated transfers.
 void cuda_matmul_transposed_weight(float* out, const float* x,
                                    const float* w, int N, int K) {
     ensure_cublas();
+    ensure_stream();
 
     float *d_x, *d_w, *d_out;
-    CUDA_CHECK(cudaMalloc(&d_x, K * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_w, (size_t)N * K * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_out, N * sizeof(float)));
+    size_t x_size = K * sizeof(float);
+    size_t w_size = (size_t)N * K * sizeof(float);
+    size_t out_size = N * sizeof(float);
 
-    CUDA_CHECK(cudaMemcpy(d_x, x, K * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_w, w, (size_t)N * K * sizeof(float), cudaMemcpyHostToDevice));
+    // Allocate from memory pool (faster than cudaMalloc)
+    d_x = static_cast<float*>(cuda_malloc_pooled(x_size));
+    d_w = static_cast<float*>(cuda_malloc_pooled(w_size));
+    d_out = static_cast<float*>(cuda_malloc_pooled(out_size));
+
+    // Copy input vector to GPU
+    CUDA_CHECK(cudaMemcpyAsync(d_x, x, x_size, cudaMemcpyHostToDevice, compute_stream));
+    
+    // Use cached weight pointer if available, otherwise copy
+    auto it = g_weight_cache.find(w);
+    if (it != g_weight_cache.end() && it->second.is_cached) {
+        d_w = static_cast<float*>(it->second.d_data);
+    } else {
+        CUDA_CHECK(cudaMemcpyAsync(d_w, w, w_size, cudaMemcpyHostToDevice, compute_stream));
+        g_weight_cache[w].cache(w, w_size);
+    }
 
     float alpha = 1.0f, beta = 0.0f;
-    // W is row-major [N×K]. Passing to cuBLAS (column-major) with lda=K
-    // makes cuBLAS interpret it as a column-major [K×N] matrix (= W^T).
-    // CUBLAS_OP_T then transposes it back to [N×K], so the sgemm computes
-    // the column-major result d_out[N×1] = W_cm[K×N]^T * d_x[K×1] = W * x^T,
-    // which corresponds to the desired row-major out[1×N] = x * W^T.
+    // cuBLAS uses column-major, so we compute B^T * A^T = (A*B)^T
     cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
                 N, 1, K, &alpha, d_w, K, d_x, K, &beta, d_out, N);
 
-    CUDA_CHECK(cudaMemcpy(out, d_out, N * sizeof(float), cudaMemcpyDeviceToHost));
+    // Copy result back to host
+    CUDA_CHECK(cudaMemcpyAsync(out, d_out, out_size, cudaMemcpyDeviceToHost, compute_stream));
+    
+    // Synchronize to ensure completion
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream));
 
-    cudaFree(d_x);
-    cudaFree(d_w);
-    cudaFree(d_out);
+    // Return memory to pool
+    cuda_free_pooled(d_x);
+    cuda_free_pooled(d_out);
 }
 
-// ---- RMS Norm kernel ----
+// ---- RMS Norm kernel with persistent memory ----
 
 __global__ void rmsnorm_kernel(float* out, const float* x, const float* w, int n, float eps) {
     // Single block reduction for RMS computation
@@ -142,24 +254,38 @@ __global__ void rmsnorm_kernel(float* out, const float* x, const float* w, int n
 }
 
 void cuda_rmsnorm(float* out, const float* x, const float* w, int n, float eps) {
+    ensure_stream();
+    
     float *d_out, *d_x, *d_w;
-    CUDA_CHECK(cudaMalloc(&d_out, n * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_x, n * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_w, n * sizeof(float)));
+    size_t buf_size = n * sizeof(float);
+    
+    // Use pooled memory allocation
+    d_out = static_cast<float*>(cuda_malloc_pooled(buf_size));
+    d_x = static_cast<float*>(cuda_malloc_pooled(buf_size));
+    d_w = static_cast<float*>(cuda_malloc_pooled(buf_size));
 
-    CUDA_CHECK(cudaMemcpy(d_x, x, n * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_w, w, n * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_x, x, buf_size, cudaMemcpyHostToDevice, compute_stream));
+    
+    // Check for cached weights
+    auto it = g_weight_cache.find(w);
+    if (it != g_weight_cache.end() && it->second.is_cached) {
+        d_w = static_cast<float*>(it->second.d_data);
+    } else {
+        CUDA_CHECK(cudaMemcpyAsync(d_w, w, buf_size, cudaMemcpyHostToDevice, compute_stream));
+        g_weight_cache[w].cache(w, buf_size);
+    }
 
     int threads = 256;
     rmsnorm_kernel<<<1, threads, threads * sizeof(float)>>>(d_out, d_x, d_w, n, eps);
 
-    CUDA_CHECK(cudaMemcpy(out, d_out, n * sizeof(float), cudaMemcpyDeviceToHost));
-    cudaFree(d_out);
-    cudaFree(d_x);
-    cudaFree(d_w);
+    CUDA_CHECK(cudaMemcpyAsync(out, d_out, buf_size, cudaMemcpyDeviceToHost, compute_stream));
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+    
+    cuda_free_pooled(d_out);
+    cuda_free_pooled(d_x);
 }
 
-// ---- Softmax kernel ----
+// ---- Softmax kernel with persistent memory ----
 
 __global__ void softmax_kernel(float* x, int n) {
     extern __shared__ float shared[];
@@ -199,18 +325,23 @@ __global__ void softmax_kernel(float* x, int n) {
 }
 
 void cuda_softmax(float* x, int n) {
+    ensure_stream();
+    
     float* d_x;
-    CUDA_CHECK(cudaMalloc(&d_x, n * sizeof(float)));
-    CUDA_CHECK(cudaMemcpy(d_x, x, n * sizeof(float), cudaMemcpyHostToDevice));
+    size_t buf_size = n * sizeof(float);
+    d_x = static_cast<float*>(cuda_malloc_pooled(buf_size));
+
+    CUDA_CHECK(cudaMemcpyAsync(d_x, x, buf_size, cudaMemcpyHostToDevice, compute_stream));
 
     int threads = 256;
     softmax_kernel<<<1, threads, threads * sizeof(float)>>>(d_x, n);
 
-    CUDA_CHECK(cudaMemcpy(x, d_x, n * sizeof(float), cudaMemcpyDeviceToHost));
-    cudaFree(d_x);
+    CUDA_CHECK(cudaMemcpyAsync(x, d_x, buf_size, cudaMemcpyDeviceToHost, compute_stream));
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+    cuda_free_pooled(d_x);
 }
 
-// ---- SiLU element-wise multiply kernel ----
+// ---- SiLU element-wise multiply kernel with persistent memory ----
 
 __global__ void silu_mul_kernel(float* out, const float* gate, const float* up, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -221,25 +352,31 @@ __global__ void silu_mul_kernel(float* out, const float* gate, const float* up, 
 }
 
 void cuda_silu_elementwise_mul(float* out, const float* gate, const float* up, int n) {
+    ensure_stream();
+    
     float *d_out, *d_gate, *d_up;
-    CUDA_CHECK(cudaMalloc(&d_out, n * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_gate, n * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_up, n * sizeof(float)));
+    size_t buf_size = n * sizeof(float);
+    
+    d_out = static_cast<float*>(cuda_malloc_pooled(buf_size));
+    d_gate = static_cast<float*>(cuda_malloc_pooled(buf_size));
+    d_up = static_cast<float*>(cuda_malloc_pooled(buf_size));
 
-    CUDA_CHECK(cudaMemcpy(d_gate, gate, n * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_up, up, n * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_gate, gate, buf_size, cudaMemcpyHostToDevice, compute_stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_up, up, buf_size, cudaMemcpyHostToDevice, compute_stream));
 
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
     silu_mul_kernel<<<blocks, threads>>>(d_out, d_gate, d_up, n);
 
-    CUDA_CHECK(cudaMemcpy(out, d_out, n * sizeof(float), cudaMemcpyDeviceToHost));
-    cudaFree(d_out);
-    cudaFree(d_gate);
-    cudaFree(d_up);
+    CUDA_CHECK(cudaMemcpyAsync(out, d_out, buf_size, cudaMemcpyDeviceToHost, compute_stream));
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+    
+    cuda_free_pooled(d_out);
+    cuda_free_pooled(d_gate);
+    cuda_free_pooled(d_up);
 }
 
-// ---- RoPE kernel ----
+// ---- RoPE kernel with persistent memory ----
 
 __global__ void rope_kernel(float* data, int dim, int head_dim, int pos, float theta) {
     int i = 2 * (blockIdx.x * blockDim.x + threadIdx.x);
@@ -257,12 +394,17 @@ __global__ void rope_kernel(float* data, int dim, int head_dim, int pos, float t
 }
 
 void cuda_rope(float* q, float* k, int q_dim, int k_dim, int head_dim, int pos, float theta) {
+    ensure_stream();
+    
     float *d_q, *d_k;
-    CUDA_CHECK(cudaMalloc(&d_q, q_dim * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_k, k_dim * sizeof(float)));
+    size_t q_size = q_dim * sizeof(float);
+    size_t k_size = k_dim * sizeof(float);
+    
+    d_q = static_cast<float*>(cuda_malloc_pooled(q_size));
+    d_k = static_cast<float*>(cuda_malloc_pooled(k_size));
 
-    CUDA_CHECK(cudaMemcpy(d_q, q, q_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_k, k, k_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_q, q, q_size, cudaMemcpyHostToDevice, compute_stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_k, k, k_size, cudaMemcpyHostToDevice, compute_stream));
 
     int threads = 256;
     int q_blocks = (q_dim / 2 + threads - 1) / threads;
@@ -270,13 +412,15 @@ void cuda_rope(float* q, float* k, int q_dim, int k_dim, int head_dim, int pos, 
     rope_kernel<<<q_blocks, threads>>>(d_q, q_dim, head_dim, pos, theta);
     rope_kernel<<<k_blocks, threads>>>(d_k, k_dim, head_dim, pos, theta);
 
-    CUDA_CHECK(cudaMemcpy(q, d_q, q_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(k, d_k, k_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    cudaFree(d_q);
-    cudaFree(d_k);
+    CUDA_CHECK(cudaMemcpyAsync(q, d_q, q_size, cudaMemcpyDeviceToHost, compute_stream));
+    CUDA_CHECK(cudaMemcpyAsync(k, d_k, k_size, cudaMemcpyDeviceToHost, compute_stream));
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+    
+    cuda_free_pooled(d_q);
+    cuda_free_pooled(d_k);
 }
 
-// ---- Element-wise add kernel ----
+// ---- Element-wise add kernel with persistent memory ----
 
 __global__ void add_kernel(float* out, const float* a, const float* b, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -286,22 +430,28 @@ __global__ void add_kernel(float* out, const float* a, const float* b, int n) {
 }
 
 void cuda_add(float* out, const float* a, const float* b, int n) {
+    ensure_stream();
+    
     float *d_out, *d_a, *d_b;
-    CUDA_CHECK(cudaMalloc(&d_out, n * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_a, n * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_b, n * sizeof(float)));
+    size_t buf_size = n * sizeof(float);
+    
+    d_out = static_cast<float*>(cuda_malloc_pooled(buf_size));
+    d_a = static_cast<float*>(cuda_malloc_pooled(buf_size));
+    d_b = static_cast<float*>(cuda_malloc_pooled(buf_size));
 
-    CUDA_CHECK(cudaMemcpy(d_a, a, n * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b, b, n * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_a, a, buf_size, cudaMemcpyHostToDevice, compute_stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_b, b, buf_size, cudaMemcpyHostToDevice, compute_stream));
 
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
     add_kernel<<<blocks, threads>>>(d_out, d_a, d_b, n);
 
-    CUDA_CHECK(cudaMemcpy(out, d_out, n * sizeof(float), cudaMemcpyDeviceToHost));
-    cudaFree(d_out);
-    cudaFree(d_a);
-    cudaFree(d_b);
+    CUDA_CHECK(cudaMemcpyAsync(out, d_out, buf_size, cudaMemcpyDeviceToHost, compute_stream));
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+    
+    cuda_free_pooled(d_out);
+    cuda_free_pooled(d_a);
+    cuda_free_pooled(d_b);
 }
 
 #endif // LLM_USE_CUDA
