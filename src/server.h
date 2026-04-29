@@ -1647,15 +1647,17 @@ static std::string server_generate(Model& model, Sampler& sampler,
     int pos = static_cast<int>(tokens.size());
     std::vector<int> recent;
     const int recent_window = 64;
+    std::vector<int> all_generated_tokens;
 
     for (int i = 0; i < max_tokens; i++) {
         float* logits = (i == 0) ? model.logits.data()
                                   : model.forward(recent.back(), pos - 1);
-        int next = sampler.sample(logits, model.config.vocab_size, recent);
+        int next = sampler.sample(logits, model.config.vocab_size, recent, all_generated_tokens);
         if (model.tokenizer.is_eos_token(next)) break;
         recent.push_back(next);
         if (static_cast<int>(recent.size()) > recent_window)
             recent.erase(recent.begin());
+        all_generated_tokens.push_back(next);
         output += model.tokenizer.decode(next);
         pos++;
     }
@@ -1679,15 +1681,17 @@ static void server_generate_stream(
     int pos = static_cast<int>(tokens.size());
     std::vector<int> recent;
     const int recent_window = 64;
+    std::vector<int> all_generated_tokens;
 
     for (int i = 0; i < max_tokens; i++) {
         float* logits = (i == 0) ? model.logits.data()
                                   : model.forward(recent.back(), pos - 1);
-        int next = sampler.sample(logits, model.config.vocab_size, recent);
+        int next = sampler.sample(logits, model.config.vocab_size, recent, all_generated_tokens);
         if (model.tokenizer.is_eos_token(next)) break;
         recent.push_back(next);
         if (static_cast<int>(recent.size()) > recent_window)
             recent.erase(recent.begin());
+        all_generated_tokens.push_back(next);
         std::string tok = model.tokenizer.decode(next);
         if (!callback(tok)) break;
         pos++;
