@@ -9,32 +9,40 @@ dist/
 # Dependencies
 .venv/
 venv/
-__pycache__/
-*.egg-info/
 node_modules/
-
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
 
 # Logs and temp files
 *.log
 *.tmp
-*.temp
+*.swp
+
+# Editors
+.vscode/
+.idea/
 
 # Environment
 .env
 .env.local
 *.env.*
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
 # Coverage
-.coverage
 coverage/
 htmlcov/
+.coverage
 
-# System files
-.DS_Store
-Thumbs.db
+# Gradle
+.gradle/
+target/
+
+# MyPy
+.mypy_cache/
+
+# PyTest
+.pytest_cache/
 ```

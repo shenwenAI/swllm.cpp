@@ -2744,7 +2744,11 @@ void test_hf_index_json_parsing() {
 
     // Create a temporary directory structure with index.json
     const char* dir = "/tmp/test_hf_index_dir";
+#ifdef _WIN32
+    mkdir(dir);
+#else
     mkdir(dir, 0755);
+#endif
 
     // Write two minimal safetensors shards
     auto make_st_buf = [](const std::string& tname) {
