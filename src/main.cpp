@@ -122,6 +122,7 @@ static void print_usage(const char* prog) {
         "  --top-k <N>              Top-K sampling (default: 40)\n"
         "  --top-p <F>              Top-P nucleus sampling (default: 0.9)\n"
         "  --repeat-penalty <F>     Repetition penalty (default: 1.1)\n"
+        "  --no-repeat-ngram <N>    No-repeat n-gram size (default: 3, 0=disable)\n"
         "  --seed <N>               Random seed (default: random)\n"
         "\n"
         "Backend options:\n"
@@ -181,6 +182,7 @@ static bool parse_args(int argc, char** argv, RunConfig& cfg) {
         } else if (arg == "--top-p" && i + 1 < argc) {
             cfg.sampler.top_p = static_cast<float>(atof(argv[++i]));
         } else if (arg == "--repeat-penalty" && i + 1 < argc) {
+        "  --no-repeat-ngram <N>    No-repeat n-gram size (default: 3, 0=disable)\n"
             cfg.sampler.repeat_penalty = static_cast<float>(atof(argv[++i]));
         } else if (arg == "--seed" && i + 1 < argc) {
             cfg.sampler.seed = static_cast<uint64_t>(atoll(argv[++i]));
@@ -274,6 +276,9 @@ static void generate(Model& model, Sampler& sampler, const std::string& prompt,
     // Track recent tokens for repetition penalty
     std::vector<int> recent_tokens;
     int recent_window = 64;
+    
+    // Track all generated tokens for no-repeat-ngram
+    std::vector<int> all_generated_tokens;
 
     // Process prompt tokens (prefill)
     for (int i = 0; i < prompt_tokens; i++) {
@@ -298,8 +303,8 @@ static void generate(Model& model, Sampler& sampler, const std::string& prompt,
             logits_ptr = model.forward(next_token, pos - 1);
         }
 
-        // Sample next token
-        next_token = sampler.sample(logits_ptr, model.config.vocab_size, recent_tokens);
+        // Sample next token with both recent tokens and all generated tokens
+        next_token = sampler.sample(logits_ptr, model.config.vocab_size, recent_tokens, all_generated_tokens);
 
         // Check for EOS
         if (model.tokenizer.is_eos_token(next_token)) {
@@ -311,6 +316,9 @@ static void generate(Model& model, Sampler& sampler, const std::string& prompt,
         if (static_cast<int>(recent_tokens.size()) > recent_window) {
             recent_tokens.erase(recent_tokens.begin());
         }
+        
+        // Track all generated tokens for no-repeat-ngram
+        all_generated_tokens.push_back(next_token);
 
         // Decode and print (with optional thinking filter)
         std::string token_str = model.tokenizer.decode(next_token);
