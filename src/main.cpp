@@ -182,8 +182,9 @@ static bool parse_args(int argc, char** argv, RunConfig& cfg) {
         } else if (arg == "--top-p" && i + 1 < argc) {
             cfg.sampler.top_p = static_cast<float>(atof(argv[++i]));
         } else if (arg == "--repeat-penalty" && i + 1 < argc) {
-        "  --no-repeat-ngram <N>    No-repeat n-gram size (default: 3, 0=disable)\n"
             cfg.sampler.repeat_penalty = static_cast<float>(atof(argv[++i]));
+        } else if (arg == "--no-repeat-ngram" && i + 1 < argc) {
+            cfg.sampler.no_repeat_ngram_size = atoi(argv[++i]);
         } else if (arg == "--seed" && i + 1 < argc) {
             cfg.sampler.seed = static_cast<uint64_t>(atoll(argv[++i]));
         } else if (arg == "--gpu") {
